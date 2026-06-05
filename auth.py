@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Dict
 
@@ -5,6 +6,8 @@ import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+logger = logging.getLogger("fhe_vault.auth")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
@@ -39,6 +42,11 @@ def validate_supabase_access_token(token: str) -> Dict[str, Any]:
         response = client.get(url, headers=headers)
 
     if response.status_code != 200:
+        logger.warning(
+            "Supabase token validation failed (status=%s, body=%s)",
+            response.status_code,
+            response.text,
+        )
         raise _forbidden()
 
     user = response.json()
@@ -69,6 +77,13 @@ async def supabase_auth_middleware(request: Request, call_next):
     try:
         await resolve_supabase_user(request)
     except HTTPException as exc:
+        logger.warning(
+            "Auth rejected %s %s -> %s: %s",
+            request.method,
+            request.url.path,
+            exc.status_code,
+            exc.detail,
+        )
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
     return await call_next(request)

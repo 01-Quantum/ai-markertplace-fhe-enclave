@@ -20,8 +20,8 @@ def fhe_key_gen(
     if eval_at_index_keys is None:
         eval_at_index_keys = []
 
-    ClearEvalMultKeys()
-    security_level = SecurityLevel.HEStd_128_classic
+    #ClearEvalMultKeys()
+    security_level = SecurityLevel.HEStd_NotSet
 
     parameters = CCParamsCKKSRNS()
     parameters.SetSecurityLevel(security_level)
@@ -58,9 +58,9 @@ def fhe_key_gen(
     mk = SerializeEvalMultKeyString(BINARY, "")
     ak = SerializeEvalAutomorphismKeyString(BINARY, "")
 
-    ClearEvalMultKeys()
+    #ClearEvalMultKeys()
     cc.ClearEvalAutomorphismKeys()
-    ReleaseAllContexts()
+    #ReleaseAllContexts()
 
     entry = (cc_bin, sk_bin, pk_bin, mk, ak)
     _cache_put(key_id, entry)

@@ -26,7 +26,7 @@ def insert_fhe_key_record(
     *,
     key_name: str,
     scheme: str,
-    multiplicative_dep: int,
+    multiplicative_depth: int,
     key_id: str,
     user_id: UUID,
     access_token: str,
@@ -37,8 +37,8 @@ def insert_fhe_key_record(
     row: Dict[str, Any] = {
         "key_name": key_name,
         "scheme": scheme,
-        "multiplicative_dep": multiplicative_dep,
-        "public_key_storag": key_id,
+        "multiplicative_depth": multiplicative_depth,
+        "public_key_storage_path": key_id,
         "user_id": str(user_id),
         "is_active": True,
     }

@@ -9,7 +9,5 @@ services:
       - SUPABASE_FHE_KEYS_TABLE=${SUPABASE_FHE_KEYS_TABLE:-fhe_keys}
       - FHE_KEYS_DIR=/data/keys
     volumes:
-      - fhe-keys-data:/data/keys
+      - ./fhe-keys-data:/data/keys
 
-volumes:
-  fhe-keys-data:
