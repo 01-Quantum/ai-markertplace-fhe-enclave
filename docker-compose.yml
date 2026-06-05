@@ -1,0 +1,15 @@
+services:
+  fhe-cc-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL:-https://hzydimksdmsrzrmqwayz.supabase.co}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-sb_publishable_FlUQEkjEyein8dH4-zGhMw_PkC5n7SR}
+      - SUPABASE_FHE_KEYS_TABLE=${SUPABASE_FHE_KEYS_TABLE:-fhe_keys}
+      - FHE_KEYS_DIR=/data/keys
+    volumes:
+      - fhe-keys-data:/data/keys
+
+volumes:
+  fhe-keys-data:
