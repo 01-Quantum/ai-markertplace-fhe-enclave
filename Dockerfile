@@ -53,7 +53,7 @@ RUN python3 -m pip install --no-cache-dir pytest httpx numpy
 
 COPY *.py /workspace/
 
-RUN mkdir -p /data/keys
+RUN mkdir -p /data/keys /data/fhe-encrypted
     
 EXPOSE 8000
 

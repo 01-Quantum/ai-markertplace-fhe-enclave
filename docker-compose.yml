@@ -7,7 +7,9 @@ services:
       - SUPABASE_URL=${SUPABASE_URL:-https://hzydimksdmsrzrmqwayz.supabase.co}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-sb_publishable_FlUQEkjEyein8dH4-zGhMw_PkC5n7SR}
       - SUPABASE_FHE_KEYS_TABLE=${SUPABASE_FHE_KEYS_TABLE:-fhe_keys}
+      - SUPABASE_MODELS_TABLE=${SUPABASE_MODELS_TABLE:-models}
       - FHE_KEYS_DIR=/data/keys
+      - FHE_ENCRYPTED_DIR=/data/fhe-encrypted
     volumes:
       - ./fhe-keys-data:/data/keys
-
+      - ./fhe-encrypted-data:/data/fhe-encrypted

@@ -1,4 +1,3 @@
-import base64
 from typing import Literal
 from uuid import UUID
 
@@ -13,8 +12,22 @@ logger = setup_logging()
 
 from auth import API_PREFIX, supabase_auth_middleware
 from fhe_key_gen import NUM_SLOTS, RING_BASE, RING_DIM
+from fhe_encrypt_service import (
+    ENCRYPTED_DIR,
+    ManifestContext,
+    encrypt_csv,
+    plan_encryption,
+    preprocess_csv,
+)
+from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
-from supabase_db import SupabaseError, insert_fhe_key_record
+from supabase_db import (
+    SupabaseError,
+    SupabaseNotFoundError,
+    resolve_fhe_key,
+    resolve_model,
+    insert_fhe_key_record,
+)
 
 app = FastAPI(
     title="FHE Vault",
@@ -67,8 +80,20 @@ class CreateFheKeyResponse(BaseModel):
 class FheEncryptResponse(BaseModel):
     model_id: str
     fhe_key_id: str
+    fhe_key_storage_path: str
     file_name: str | None
     file_size: int
+    slots: int
+    params_count: int
+    rows_per_ciphertext: int
+    total_rows: int
+    ciphertext_count: int
+    removed_columns: list[str]
+    columns: list[str]
+    encrypt_id: str
+    output_dir: str
+    ciphertext_files: list[str]
+    manifest_file: str
     status: str
 
 
@@ -121,6 +146,28 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
+@app.exception_handler(KeyLoadError)
+async def key_load_error_handler(request: Request, exc: KeyLoadError):
+    logger.warning(
+        "Key load error %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+    )
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SupabaseNotFoundError)
+async def supabase_not_found_handler(request: Request, exc: SupabaseNotFoundError):
+    logger.warning(
+        "Supabase not found %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+    )
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
 @app.exception_handler(SupabaseError)
 async def supabase_error_handler(request: Request, exc: SupabaseError):
     logger.error(
@@ -145,7 +192,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "keys_dir": str(KEYS_DIR)}
+    return {
+        "status": "ok",
+        "keys_dir": str(KEYS_DIR),
+        "encrypted_dir": str(ENCRYPTED_DIR),
+    }
 
 
 @router.post(
@@ -204,39 +255,94 @@ async def fhe_encrypt(
     file: UploadFile = File(...),
 ):
     user_id = _user_id(request)
+    access_token = _access_token(request)
     file_content = await file.read()
 
     logger.info(
-        "fhe-encrypt request user_id=%s model_id=%s fhe_key_id=%s",
+        "fhe-encrypt request user_id=%s model_id=%s fhe_key_id=%s file=%s size=%s",
         user_id,
         model_id,
         fhe_key_id,
-    )
-    logger.info(
-        "fhe-encrypt file filename=%s content_type=%s size=%s",
         file.filename,
-        file.content_type,
         len(file_content),
     )
-    logger.info("fhe-encrypt file content (raw bytes): %r", file_content)
+
+    fhe_key = resolve_fhe_key(fhe_key_id=fhe_key_id, access_token=access_token)
+    model = resolve_model(model_id=model_id, access_token=access_token)
+
+    logger.info(
+        "fhe-encrypt resolved fhe_key supabase_id=%s storage_path=%s slots=%s key_name=%s "
+        "model_name=%s model_type=%s",
+        fhe_key.id,
+        fhe_key.storage_path,
+        fhe_key.slots,
+        fhe_key.key_name,
+        model.name,
+        model.model_type,
+    )
 
     try:
+        csv_result = preprocess_csv(file_content)
         logger.info(
-            "fhe-encrypt file content (utf-8): %s",
-            file_content.decode("utf-8"),
+            "fhe-encrypt csv columns=%s removed=%s params_count=%s",
+            csv_result.columns,
+            csv_result.removed_columns,
+            model.params_count,
         )
-    except UnicodeDecodeError:
-        logger.info(
-            "fhe-encrypt file content (base64): %s",
-            base64.b64encode(file_content).decode("ascii"),
+        encrypt_plan = plan_encryption(fhe_key.slots, model.params_count, csv_result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        encrypt_result = encrypt_csv(
+            fhe_key_storage_path=fhe_key.storage_path,
+            manifest_ctx=ManifestContext(
+                supabase_fhe_key_id=fhe_key.id,
+                fhe_key_storage_path=fhe_key.storage_path,
+                model_id=model.id,
+                model_name=model.name,
+                model_type=model.model_type,
+            ),
+            csv=csv_result,
+            plan=encrypt_plan,
         )
+    except KeyLoadError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.info(
+        "fhe-encrypt complete encrypt_id=%s slots=%s params_count=%s "
+        "rows_per_ciphertext=%s total_rows=%s ciphertext_count=%s "
+        "output_dir=%s files=%s",
+        encrypt_result.encrypt_id,
+        encrypt_plan.slots,
+        encrypt_plan.params_count,
+        encrypt_plan.rows_per_ciphertext,
+        encrypt_plan.total_rows,
+        encrypt_plan.ciphertext_count,
+        encrypt_result.output_dir,
+        encrypt_result.ciphertext_files,
+    )
 
     return FheEncryptResponse(
         model_id=model_id,
         fhe_key_id=fhe_key_id,
+        fhe_key_storage_path=fhe_key.storage_path,
         file_name=file.filename,
         file_size=len(file_content),
-        status="received",
+        slots=encrypt_plan.slots,
+        params_count=encrypt_plan.params_count,
+        rows_per_ciphertext=encrypt_plan.rows_per_ciphertext,
+        total_rows=encrypt_plan.total_rows,
+        ciphertext_count=encrypt_plan.ciphertext_count,
+        removed_columns=encrypt_plan.removed_columns,
+        columns=encrypt_plan.columns,
+        encrypt_id=encrypt_result.encrypt_id,
+        output_dir=str(encrypt_result.output_dir),
+        ciphertext_files=encrypt_result.ciphertext_files,
+        manifest_file=encrypt_result.manifest_file,
+        status="encrypted",
     )
 
 
