@@ -3,6 +3,10 @@ from typing import Dict, List, Tuple
 
 from openfhe import *
 
+RING_BASE = 15
+RING_DIM = 2**RING_BASE
+NUM_SLOTS = 2 ** (RING_BASE - 1)
+
 _cc_cache: Dict[str, Tuple[bytes, bytes, bytes, bytes, bytes]] = {}
 CACHE_MAX_SIZE = 1
 
@@ -25,7 +29,7 @@ def fhe_key_gen(
 
     parameters = CCParamsCKKSRNS()
     parameters.SetSecurityLevel(security_level)
-    parameters.SetRingDim(1 << 16)
+    parameters.SetRingDim(RING_DIM)
     parameters.SetKeySwitchTechnique(HYBRID)
 
     scaling_mod_size = 30
