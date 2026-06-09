@@ -9,6 +9,7 @@ services:
       - SUPABASE_FHE_KEYS_TABLE=${SUPABASE_FHE_KEYS_TABLE:-fhe_keys}
       - SUPABASE_MODELS_TABLE=${SUPABASE_MODELS_TABLE:-models}
       - SUPABASE_ENCRYPTED_DATASETS_TABLE=${SUPABASE_ENCRYPTED_DATASETS_TABLE:-fhe_encrypted_datasets}
+      - SUPABASE_ENCRYPTED_RESULTS_TABLE=${SUPABASE_ENCRYPTED_RESULTS_TABLE:-fhe_encrypted_results}
       - FHE_KEYS_DIR=/data/keys
       - FHE_ENCRYPTED_DIR=/data/fhe-encrypted
       - FHE_ENCRYPTED_RESULTS_DIR=/data/fhe-encrypted-results

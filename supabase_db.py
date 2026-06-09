@@ -12,6 +12,9 @@ SUPABASE_MODELS_TABLE = os.environ.get("SUPABASE_MODELS_TABLE", "models")
 SUPABASE_ENCRYPTED_DATASETS_TABLE = os.environ.get(
     "SUPABASE_ENCRYPTED_DATASETS_TABLE", "fhe_encrypted_datasets"
 )
+SUPABASE_ENCRYPTED_RESULTS_TABLE = os.environ.get(
+    "SUPABASE_ENCRYPTED_RESULTS_TABLE", "fhe_encrypted_results"
+)
 
 
 class SupabaseError(Exception):
@@ -257,6 +260,67 @@ def insert_fhe_encrypted_dataset(
     }
 
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_DATASETS_TABLE}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(url, headers=_user_headers(access_token), json=row)
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase insert failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    return row
+
+
+def insert_fhe_encrypted_result(
+    *,
+    user_id: UUID,
+    manifest: Dict[str, Any],
+    access_token: str,
+    status: str = "completed",
+) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    row: Dict[str, Any] = {
+        "user_id": str(user_id),
+        "result_id": manifest["result_id"],
+        "result_path": manifest["result_path"],
+        "encrypted_dataset_id": int(manifest["encrypted_dataset_id"]),
+        "encrypt_id": manifest["encrypt_id"],
+        "dataset_model_id": int(manifest["dataset_model_id"]),
+        "dataset_model_name": manifest["dataset_model_name"],
+        "dataset_model_type": manifest["dataset_model_type"],
+        "model_id": int(manifest["model_id"]),
+        "model_name": manifest["model_name"],
+        "model_type": manifest["model_type"],
+        "fhe_key_id": int(manifest["supabase_fhe_key_id"]),
+        "fhe_key_storage_path": manifest["fhe_key_storage_path"],
+        "operation": manifest.get("operation", "batched_linear_score"),
+        "slots": int(manifest["slots"]),
+        "params_count": int(manifest["params_count"]),
+        "rows_per_ciphertext": int(manifest["rows_per_ciphertext"]),
+        "total_rows": int(manifest["total_rows"]),
+        "ciphertext_count": int(manifest["ciphertext_count"]),
+        "result_count": int(manifest["result_count"]),
+        "columns": list(manifest.get("columns") or []),
+        "model_feature_names": list(manifest.get("model_feature_names") or []),
+        "weight_mapping": manifest.get("weight_mapping") or [],
+        "intercept": float(manifest.get("intercept", 0)),
+        "threshold": manifest.get("threshold"),
+        "classes": list(manifest.get("classes") or []),
+        "row_result_slot_map": manifest.get("row_result_slot_map") or {},
+        "input_ciphertext_files": list(manifest.get("input_ciphertext_files") or []),
+        "result_files": list(manifest.get("result_files") or []),
+        "manifest_json": manifest,
+        "status": status,
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_RESULTS_TABLE}"
     with httpx.Client(timeout=30.0) as client:
         response = client.post(url, headers=_user_headers(access_token), json=row)
 

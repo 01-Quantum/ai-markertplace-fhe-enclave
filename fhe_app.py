@@ -34,6 +34,7 @@ from supabase_db import (
     resolve_model,
     resolve_model_with_json,
     insert_fhe_encrypted_dataset,
+    insert_fhe_encrypted_result,
     insert_fhe_key_record,
 )
 
@@ -118,6 +119,7 @@ class FheInferenceResponse(BaseModel):
     result_count: int
     status: str
     manifest: dict
+    supabase_record: dict
 
 
 class FheDecryptRowResult(BaseModel):
@@ -643,12 +645,31 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     manifest = inference_result.manifest
+    try:
+        supabase_record = insert_fhe_encrypted_result(
+            user_id=user_id,
+            manifest=manifest,
+            access_token=access_token,
+        )
+    except SupabaseError as exc:
+        logger.error(
+            "[inference] Supabase insert failed result_id=%s: %s",
+            inference_result.result_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Inference succeeded but database save failed: {exc}",
+        ) from exc
+
     logger.info(
         "[inference] API complete encrypted_dataset_id=%s model_id=%s result_id=%s "
-        "params_count=%s total_rows=%s result_count=%s output_dir=%s manifest_file=%s",
+        "supabase_id=%s params_count=%s total_rows=%s result_count=%s output_dir=%s "
+        "manifest_file=%s",
         body.encrypted_dataset_id,
         dataset.model_id,
         inference_result.result_id,
+        supabase_record.get("id"),
         dataset.params_count,
         dataset.total_rows,
         len(inference_result.result_files),
@@ -670,6 +691,7 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         result_count=len(inference_result.result_files),
         status="completed",
         manifest=manifest,
+        supabase_record=supabase_record,
     )
 
 
