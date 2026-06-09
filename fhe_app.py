@@ -20,6 +20,7 @@ from fhe_encrypt_service import (
     plan_encryption,
     preprocess_csv,
 )
+from fhe_decrypt_service import decrypt_inference_results
 from fhe_inference_service import RESULTS_DIR, run_inference
 from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
@@ -117,6 +118,35 @@ class FheInferenceResponse(BaseModel):
     result_count: int
     status: str
     manifest: dict
+
+
+class FheDecryptRowResult(BaseModel):
+    row_index: int
+    linear_score: float
+    probability: float | None = None
+    predicted_class: str | None = None
+
+
+class FheDecryptResultsRequest(BaseModel):
+    result_id: str = Field(
+        ...,
+        min_length=32,
+        max_length=32,
+        description="Inference result folder id returned by /fhe-inference",
+    )
+
+
+class FheDecryptResultsResponse(BaseModel):
+    result_id: str
+    encrypted_dataset_id: int
+    model_id: int
+    model_name: str
+    total_rows: int
+    params_count: int
+    threshold: float | None = None
+    classes: list[str]
+    rows: list[FheDecryptRowResult]
+    status: str
 
 
 class FheEncryptResponse(BaseModel):
@@ -640,6 +670,76 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         result_count=len(inference_result.result_files),
         status="completed",
         manifest=manifest,
+    )
+
+
+@router.post("/fhe-decrypt-results", response_model=FheDecryptResultsResponse)
+def fhe_decrypt_results(body: FheDecryptResultsRequest, request: Request):
+    user_id = _user_id(request)
+
+    logger.info(
+        "fhe-decrypt-results request user_id=%s result_id=%s",
+        user_id,
+        body.result_id,
+    )
+
+    try:
+        decrypt_output = decrypt_inference_results(result_id=body.result_id)
+    except ValueError as exc:
+        logger.error(
+            "[decrypt] failed: result_id=%s error=%s",
+            body.result_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    manifest = decrypt_output.manifest
+    threshold = manifest.get("threshold")
+    classes_raw = manifest.get("classes") or []
+    classes = (
+        [value for value in classes_raw if isinstance(value, str)]
+        if isinstance(classes_raw, list)
+        else []
+    )
+
+    rows = [
+        FheDecryptRowResult(
+            row_index=row.row_index,
+            linear_score=row.linear_score,
+            probability=row.probability,
+            predicted_class=row.predicted_class,
+        )
+        for row in decrypt_output.rows
+    ]
+
+    logger.info(
+        "[decrypt] API complete result_id=%s encrypted_dataset_id=%s total_rows=%s "
+        "preview=%s",
+        body.result_id,
+        manifest.get("encrypted_dataset_id"),
+        len(rows),
+        [
+            {
+                "row_index": row.row_index,
+                "linear_score": round(row.linear_score, 6),
+                "probability": round(row.probability, 6) if row.probability is not None else None,
+                "predicted_class": row.predicted_class,
+            }
+            for row in rows[:3]
+        ],
+    )
+
+    return FheDecryptResultsResponse(
+        result_id=body.result_id,
+        encrypted_dataset_id=int(manifest.get("encrypted_dataset_id", 0)),
+        model_id=int(manifest.get("model_id", 0)),
+        model_name=str(manifest.get("model_name", "")),
+        total_rows=len(rows),
+        params_count=int(manifest.get("params_count", 0)),
+        threshold=float(threshold) if isinstance(threshold, (int, float)) else None,
+        classes=classes,
+        rows=rows,
+        status="decrypted",
     )
 
 

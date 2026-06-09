@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from openfhe import BINARY, DeserializeCryptoContext, DeserializePublicKey
+from openfhe import BINARY, DeserializeCryptoContext, DeserializePrivateKey, DeserializePublicKey
 
 from key_storage import FILE_NAMES, key_dir
 
@@ -88,3 +88,44 @@ def load_inference_context(fhe_key_id: str):
 
     logger.info("[inference] load_inference_context complete: key_id=%s", fhe_key_id)
     return cc, public_key
+
+
+def load_decryption_context(fhe_key_id: str):
+    """Load crypto context and secret key for decrypting ciphertexts."""
+    directory = key_dir(fhe_key_id)
+    logger.info(
+        "[decrypt] load_decryption_context: key_id=%s directory=%s exists=%s",
+        fhe_key_id,
+        directory,
+        directory.exists(),
+    )
+    if not directory.exists():
+        raise KeyLoadError(
+            f"FHE key files not found locally at {directory}. "
+            f"Ensure the key was generated on this server (storage path: {fhe_key_id})."
+        )
+
+    cc_path = directory / FILE_NAMES["cryptocontext"]
+    sk_path = directory / FILE_NAMES["secretkey"]
+    for path in (cc_path, sk_path):
+        if not path.exists():
+            raise KeyLoadError(f"Missing key file: {path}")
+        logger.info(
+            "[decrypt] key file present: name=%s path=%s size_bytes=%s",
+            path.name,
+            path,
+            path.stat().st_size,
+        )
+
+    logger.info("[decrypt] deserializing crypto context: %s", cc_path)
+    cc, cc_ok = DeserializeCryptoContext(str(cc_path), BINARY)
+    if not cc_ok:
+        raise KeyLoadError(f"Failed to deserialize crypto context from {cc_path}")
+
+    logger.info("[decrypt] deserializing secret key: %s", sk_path)
+    secret_key, sk_ok = DeserializePrivateKey(str(sk_path), BINARY)
+    if not sk_ok:
+        raise KeyLoadError(f"Failed to deserialize secret key from {sk_path}")
+
+    logger.info("[decrypt] load_decryption_context complete: key_id=%s", fhe_key_id)
+    return cc, secret_key
