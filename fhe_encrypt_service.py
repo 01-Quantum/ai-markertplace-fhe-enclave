@@ -3,7 +3,9 @@ import io
 import json
 import math
 import os
+import re
 import secrets
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from fhe_key_load import load_encryption_context
 
 ENCRYPTED_DIR = Path(os.environ.get("FHE_ENCRYPTED_DIR", "/data/fhe-encrypted"))
 STRIP_COLUMNS = frozenset({"actual", "expected"})
+_ENCRYPT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @dataclass
@@ -49,6 +52,7 @@ class EncryptResult:
     output_dir: Path
     ciphertext_files: list[str]
     manifest_file: str
+    manifest: dict
 
 
 def _parse_float(value: str) -> float:
@@ -241,4 +245,27 @@ def encrypt_csv(
         output_dir=output_dir,
         ciphertext_files=ciphertext_files,
         manifest_file=str(manifest_path),
+        manifest=manifest,
     )
+
+
+def _encrypted_dataset_dir(encrypt_id: str) -> Path:
+    if not _ENCRYPT_ID_RE.fullmatch(encrypt_id):
+        raise ValueError(f"Invalid encrypt_id: {encrypt_id}")
+
+    base = ENCRYPTED_DIR.resolve()
+    target = (ENCRYPTED_DIR / encrypt_id).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"Refusing to delete path outside encrypted dir: {target}")
+    return target
+
+
+def delete_encrypted_dataset_files(encrypt_id: str) -> bool:
+    """Remove ciphertext folder for encrypt_id. Returns True if a directory was removed."""
+    target = _encrypted_dataset_dir(encrypt_id)
+    if not target.exists():
+        return False
+    if not target.is_dir():
+        raise ValueError(f"Encrypted dataset path is not a directory: {target}")
+    shutil.rmtree(target)
+    return True

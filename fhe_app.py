@@ -15,6 +15,7 @@ from fhe_key_gen import NUM_SLOTS, RING_BASE, RING_DIM
 from fhe_encrypt_service import (
     ENCRYPTED_DIR,
     ManifestContext,
+    delete_encrypted_dataset_files,
     encrypt_csv,
     plan_encryption,
     preprocess_csv,
@@ -24,8 +25,11 @@ from key_storage import KEYS_DIR, generate_and_store
 from supabase_db import (
     SupabaseError,
     SupabaseNotFoundError,
+    delete_fhe_encrypted_dataset,
+    resolve_fhe_encrypted_dataset,
     resolve_fhe_key,
     resolve_model,
+    insert_fhe_encrypted_dataset,
     insert_fhe_key_record,
 )
 
@@ -77,6 +81,17 @@ class CreateFheKeyResponse(BaseModel):
     supabase_record: dict
 
 
+class FheDatasetDeleteRequest(BaseModel):
+    id: int = Field(..., gt=0, description="Supabase fhe_encrypted_datasets row id")
+
+
+class FheDatasetDeleteResponse(BaseModel):
+    id: int
+    encrypt_id: str
+    deleted_files: bool
+    status: str
+
+
 class FheEncryptResponse(BaseModel):
     model_id: str
     fhe_key_id: str
@@ -95,6 +110,7 @@ class FheEncryptResponse(BaseModel):
     ciphertext_files: list[str]
     manifest_file: str
     status: str
+    supabase_record: dict
 
 
 def _scheme_label(key_type: str) -> str:
@@ -311,11 +327,47 @@ async def fhe_encrypt(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    manifest = encrypt_result.manifest
+    try:
+        supabase_record = insert_fhe_encrypted_dataset(
+            user_id=user_id,
+            encrypt_id=encrypt_result.encrypt_id,
+            encrypt_path=manifest["encrypt_path"],
+            source_file_name=file.filename,
+            source_file_size=len(file_content),
+            model_id=int(model.id),
+            model_name=manifest["model_name"],
+            model_type=manifest["model_type"],
+            fhe_key_id=int(manifest["supabase_fhe_key_id"]),
+            fhe_key_storage_path=manifest["fhe_key_storage_path"],
+            slots=int(manifest["slots"]),
+            params_count=int(manifest["params_count"]),
+            rows_per_ciphertext=int(manifest["rows_per_ciphertext"]),
+            total_rows=int(manifest["total_rows"]),
+            ciphertext_count=int(manifest["ciphertext_count"]),
+            removed_columns=list(manifest["removed_columns"]),
+            columns=list(manifest["columns"]),
+            ciphertext_files=list(manifest["ciphertext_files"]),
+            manifest_json=manifest,
+            access_token=access_token,
+        )
+    except SupabaseError as exc:
+        logger.error(
+            "fhe-encrypt Supabase insert failed encrypt_id=%s: %s",
+            encrypt_result.encrypt_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Encryption succeeded but database save failed: {exc}",
+        ) from exc
+
     logger.info(
-        "fhe-encrypt complete encrypt_id=%s slots=%s params_count=%s "
+        "fhe-encrypt complete encrypt_id=%s supabase_id=%s slots=%s params_count=%s "
         "rows_per_ciphertext=%s total_rows=%s ciphertext_count=%s "
         "output_dir=%s files=%s",
         encrypt_result.encrypt_id,
+        supabase_record.get("id"),
         encrypt_plan.slots,
         encrypt_plan.params_count,
         encrypt_plan.rows_per_ciphertext,
@@ -343,6 +395,84 @@ async def fhe_encrypt(
         ciphertext_files=encrypt_result.ciphertext_files,
         manifest_file=encrypt_result.manifest_file,
         status="encrypted",
+        supabase_record=supabase_record,
+    )
+
+
+@router.post("/fhe-dataset-delete", response_model=FheDatasetDeleteResponse)
+def fhe_dataset_delete(body: FheDatasetDeleteRequest, request: Request):
+    user_id = _user_id(request)
+    access_token = _access_token(request)
+
+    logger.info(
+        "fhe-dataset-delete request user_id=%s dataset_id=%s",
+        user_id,
+        body.id,
+    )
+
+    try:
+        dataset = resolve_fhe_encrypted_dataset(
+            dataset_id=body.id,
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if dataset.user_id != str(user_id):
+        raise HTTPException(status_code=403, detail="Not allowed to delete this dataset")
+
+    try:
+        deleted_files = delete_encrypted_dataset_files(dataset.encrypt_id)
+    except ValueError as exc:
+        logger.error(
+            "fhe-dataset-delete file cleanup failed dataset_id=%s encrypt_id=%s: %s",
+            body.id,
+            dataset.encrypt_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error(
+            "fhe-dataset-delete file cleanup failed dataset_id=%s encrypt_id=%s: %s",
+            body.id,
+            dataset.encrypt_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"File cleanup failed: {exc}",
+        ) from exc
+
+    try:
+        deleted_row = delete_fhe_encrypted_dataset(
+            dataset_id=body.id,
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        logger.error(
+            "fhe-dataset-delete Supabase delete failed dataset_id=%s: %s",
+            body.id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database delete failed: {exc}",
+        ) from exc
+
+    logger.info(
+        "fhe-dataset-delete complete dataset_id=%s encrypt_id=%s deleted_files=%s",
+        body.id,
+        dataset.encrypt_id,
+        deleted_files,
+    )
+
+    return FheDatasetDeleteResponse(
+        id=int(deleted_row.get("id", body.id)),
+        encrypt_id=dataset.encrypt_id,
+        deleted_files=deleted_files,
+        status="deleted",
     )
 
 

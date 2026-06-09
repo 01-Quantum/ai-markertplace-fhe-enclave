@@ -8,6 +8,7 @@ services:
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY:-sb_publishable_FlUQEkjEyein8dH4-zGhMw_PkC5n7SR}
       - SUPABASE_FHE_KEYS_TABLE=${SUPABASE_FHE_KEYS_TABLE:-fhe_keys}
       - SUPABASE_MODELS_TABLE=${SUPABASE_MODELS_TABLE:-models}
+      - SUPABASE_ENCRYPTED_DATASETS_TABLE=${SUPABASE_ENCRYPTED_DATASETS_TABLE:-fhe_encrypted_datasets}
       - FHE_KEYS_DIR=/data/keys
       - FHE_ENCRYPTED_DIR=/data/fhe-encrypted
     volumes:

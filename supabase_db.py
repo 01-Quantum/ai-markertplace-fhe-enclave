@@ -9,6 +9,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_TABLE = os.environ.get("SUPABASE_FHE_KEYS_TABLE", "fhe_keys")
 SUPABASE_MODELS_TABLE = os.environ.get("SUPABASE_MODELS_TABLE", "models")
+SUPABASE_ENCRYPTED_DATASETS_TABLE = os.environ.get(
+    "SUPABASE_ENCRYPTED_DATASETS_TABLE", "fhe_encrypted_datasets"
+)
 
 
 class SupabaseError(Exception):
@@ -164,3 +167,117 @@ def insert_fhe_key_record(
     if isinstance(data, dict):
         return data
     return row
+
+
+def insert_fhe_encrypted_dataset(
+    *,
+    user_id: UUID,
+    encrypt_id: str,
+    encrypt_path: str,
+    source_file_name: str | None,
+    source_file_size: int,
+    model_id: int,
+    model_name: str,
+    model_type: str,
+    fhe_key_id: int,
+    fhe_key_storage_path: str,
+    slots: int,
+    params_count: int,
+    rows_per_ciphertext: int,
+    total_rows: int,
+    ciphertext_count: int,
+    removed_columns: list[str],
+    columns: list[str],
+    ciphertext_files: list[str],
+    manifest_json: Dict[str, Any],
+    access_token: str,
+    status: str = "encrypted",
+) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    row: Dict[str, Any] = {
+        "user_id": str(user_id),
+        "encrypt_id": encrypt_id,
+        "encrypt_path": encrypt_path,
+        "source_file_name": source_file_name,
+        "source_file_size": source_file_size,
+        "model_id": model_id,
+        "model_name": model_name,
+        "model_type": model_type,
+        "fhe_key_id": fhe_key_id,
+        "fhe_key_storage_path": fhe_key_storage_path,
+        "slots": slots,
+        "params_count": params_count,
+        "rows_per_ciphertext": rows_per_ciphertext,
+        "total_rows": total_rows,
+        "ciphertext_count": ciphertext_count,
+        "removed_columns": removed_columns,
+        "columns": columns,
+        "ciphertext_files": ciphertext_files,
+        "manifest_json": manifest_json,
+        "status": status,
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_DATASETS_TABLE}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(url, headers=_user_headers(access_token), json=row)
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase insert failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    return row
+
+
+@dataclass
+class EncryptedDatasetRecord:
+    id: int
+    encrypt_id: str
+    encrypt_path: str
+    user_id: str
+
+
+def resolve_fhe_encrypted_dataset(
+    *, dataset_id: int, access_token: str
+) -> EncryptedDatasetRecord:
+    row = _get_single_row(
+        table=SUPABASE_ENCRYPTED_DATASETS_TABLE,
+        access_token=access_token,
+        filters={"id": str(dataset_id)},
+        select="id,encrypt_id,encrypt_path,user_id",
+        not_found_message=f"Encrypted dataset not found: {dataset_id}",
+    )
+    return EncryptedDatasetRecord(
+        id=int(row["id"]),
+        encrypt_id=str(row["encrypt_id"]),
+        encrypt_path=str(row.get("encrypt_path", "")),
+        user_id=str(row["user_id"]),
+    )
+
+
+def delete_fhe_encrypted_dataset(*, dataset_id: int, access_token: str) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_DATASETS_TABLE}?id=eq.{dataset_id}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.delete(url, headers=_user_headers(access_token))
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase delete failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    raise SupabaseNotFoundError(f"Encrypted dataset not found: {dataset_id}")
