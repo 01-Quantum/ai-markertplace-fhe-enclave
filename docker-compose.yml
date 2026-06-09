@@ -11,6 +11,9 @@ services:
       - SUPABASE_ENCRYPTED_DATASETS_TABLE=${SUPABASE_ENCRYPTED_DATASETS_TABLE:-fhe_encrypted_datasets}
       - FHE_KEYS_DIR=/data/keys
       - FHE_ENCRYPTED_DIR=/data/fhe-encrypted
+      - FHE_ENCRYPTED_RESULTS_DIR=/data/fhe-encrypted-results
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./fhe-keys-data:/data/keys
       - ./fhe-encrypted-data:/data/fhe-encrypted
+      - ./fhe-encrypted-results-data:/data/fhe-encrypted-results

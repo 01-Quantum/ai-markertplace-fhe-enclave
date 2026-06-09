@@ -20,6 +20,7 @@ from fhe_encrypt_service import (
     plan_encryption,
     preprocess_csv,
 )
+from fhe_inference_service import RESULTS_DIR, run_inference
 from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
 from supabase_db import (
@@ -27,8 +28,10 @@ from supabase_db import (
     SupabaseNotFoundError,
     delete_fhe_encrypted_dataset,
     resolve_fhe_encrypted_dataset,
+    resolve_fhe_encrypted_dataset_full,
     resolve_fhe_key,
     resolve_model,
+    resolve_model_with_json,
     insert_fhe_encrypted_dataset,
     insert_fhe_key_record,
 )
@@ -90,6 +93,30 @@ class FheDatasetDeleteResponse(BaseModel):
     encrypt_id: str
     deleted_files: bool
     status: str
+
+
+class FheInferenceRequest(BaseModel):
+    encrypted_dataset_id: int = Field(
+        ...,
+        gt=0,
+        description="Supabase fhe_encrypted_datasets row id (model_id is read from this record)",
+    )
+
+
+class FheInferenceResponse(BaseModel):
+    encrypted_dataset_id: int
+    model_id: int
+    result_id: str
+    output_dir: str
+    result_files: list[str]
+    manifest_file: str
+    slots: int
+    params_count: int
+    rows_per_ciphertext: int
+    total_rows: int
+    result_count: int
+    status: str
+    manifest: dict
 
 
 class FheEncryptResponse(BaseModel):
@@ -212,6 +239,7 @@ def health():
         "status": "ok",
         "keys_dir": str(KEYS_DIR),
         "encrypted_dir": str(ENCRYPTED_DIR),
+        "encrypted_results_dir": str(RESULTS_DIR),
     }
 
 
@@ -473,6 +501,145 @@ def fhe_dataset_delete(body: FheDatasetDeleteRequest, request: Request):
         encrypt_id=dataset.encrypt_id,
         deleted_files=deleted_files,
         status="deleted",
+    )
+
+
+@router.post("/fhe-inference", response_model=FheInferenceResponse)
+def fhe_inference(body: FheInferenceRequest, request: Request):
+    user_id = _user_id(request)
+    access_token = _access_token(request)
+
+    logger.info(
+        "fhe-inference request user_id=%s encrypted_dataset_id=%s",
+        user_id,
+        body.encrypted_dataset_id,
+    )
+
+    try:
+        logger.info(
+            "[inference] resolving Supabase encrypted dataset id=%s",
+            body.encrypted_dataset_id,
+        )
+        dataset = resolve_fhe_encrypted_dataset_full(
+            dataset_id=body.encrypted_dataset_id,
+            access_token=access_token,
+        )
+        logger.info(
+            "[inference] resolved dataset: id=%s encrypt_id=%s model_id=%s "
+            "model_name=%s params_count=%s slots=%s rows_per_ciphertext=%s "
+            "total_rows=%s ciphertext_count=%s fhe_key_id=%s "
+            "fhe_key_storage_path=%s columns_count=%s ciphertext_files=%s",
+            dataset.id,
+            dataset.encrypt_id,
+            dataset.model_id,
+            dataset.model_name,
+            dataset.params_count,
+            dataset.slots,
+            dataset.rows_per_ciphertext,
+            dataset.total_rows,
+            dataset.ciphertext_count,
+            dataset.fhe_key_id,
+            dataset.fhe_key_storage_path,
+            len(dataset.columns),
+            dataset.ciphertext_files,
+        )
+        logger.info(
+            "[inference] resolving Supabase model from dataset model_id=%s",
+            dataset.model_id,
+        )
+        model = resolve_model_with_json(
+            model_id=str(dataset.model_id),
+            access_token=access_token,
+        )
+        feature_count = len(model.model_json.get("features", []))
+        logger.info(
+            "[inference] resolved model: id=%s name=%s type=%s params_count=%s "
+            "feature_count=%s intercept=%s",
+            model.id,
+            model.name,
+            model.model_type,
+            model.params_count,
+            feature_count,
+            model.model_json.get("intercept"),
+        )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if dataset.params_count != model.params_count:
+        logger.warning(
+            "[inference] params_count mismatch: dataset=%s model=%s",
+            dataset.params_count,
+            model.params_count,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model params_count ({model.params_count}) does not match encrypted "
+                f"dataset params_count ({dataset.params_count})"
+            ),
+        )
+
+    logger.info("[inference] starting homomorphic inference pipeline")
+    try:
+        inference_result = run_inference(
+            dataset_id=dataset.id,
+            encrypt_id=dataset.encrypt_id,
+            fhe_key_id=dataset.fhe_key_id,
+            fhe_key_storage_path=dataset.fhe_key_storage_path,
+            dataset_model_id=dataset.model_id,
+            dataset_model_name=dataset.model_name,
+            dataset_model_type=dataset.model_type,
+            inference_model_id=int(model.id),
+            inference_model_name=model.name,
+            inference_model_type=model.model_type,
+            columns=dataset.columns,
+            ciphertext_files=dataset.ciphertext_files,
+            slots=dataset.slots,
+            params_count=dataset.params_count,
+            rows_per_ciphertext=dataset.rows_per_ciphertext,
+            total_rows=dataset.total_rows,
+            ciphertext_count=dataset.ciphertext_count,
+            model_json=model.model_json,
+        )
+    except ValueError as exc:
+        logger.error(
+            "[inference] pipeline failed: encrypted_dataset_id=%s model_id=%s error=%s",
+            body.encrypted_dataset_id,
+            dataset.model_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    manifest = inference_result.manifest
+    logger.info(
+        "[inference] API complete encrypted_dataset_id=%s model_id=%s result_id=%s "
+        "params_count=%s total_rows=%s result_count=%s output_dir=%s manifest_file=%s",
+        body.encrypted_dataset_id,
+        dataset.model_id,
+        inference_result.result_id,
+        dataset.params_count,
+        dataset.total_rows,
+        len(inference_result.result_files),
+        inference_result.output_dir,
+        inference_result.manifest_file,
+    )
+
+    return FheInferenceResponse(
+        encrypted_dataset_id=body.encrypted_dataset_id,
+        model_id=dataset.model_id,
+        result_id=inference_result.result_id,
+        output_dir=str(inference_result.output_dir),
+        result_files=inference_result.result_files,
+        manifest_file=inference_result.manifest_file,
+        slots=dataset.slots,
+        params_count=dataset.params_count,
+        rows_per_ciphertext=dataset.rows_per_ciphertext,
+        total_rows=dataset.total_rows,
+        result_count=len(inference_result.result_files),
+        status="completed",
+        manifest=manifest,
     )
 
 

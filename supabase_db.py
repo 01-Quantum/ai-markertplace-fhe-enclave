@@ -106,6 +106,15 @@ class ModelRecord:
     model_type: str
 
 
+@dataclass
+class ModelFullRecord:
+    id: str
+    params_count: int
+    name: str
+    model_type: str
+    model_json: Dict[str, Any]
+
+
 def resolve_model(*, model_id: str, access_token: str) -> ModelRecord:
     row = _get_single_row(
         table=SUPABASE_MODELS_TABLE,
@@ -126,6 +135,34 @@ def resolve_model(*, model_id: str, access_token: str) -> ModelRecord:
         params_count=int(params_count),
         name=str(name),
         model_type=str(model_type),
+    )
+
+
+def resolve_model_with_json(*, model_id: str, access_token: str) -> ModelFullRecord:
+    row = _get_single_row(
+        table=SUPABASE_MODELS_TABLE,
+        access_token=access_token,
+        filters={"id": model_id},
+        select="id,params_count,model_name,model_type,model_json",
+        not_found_message=f"Model not found: {model_id}",
+    )
+    params_count = row.get("params_count")
+    if params_count is None:
+        raise SupabaseError(f"Model {model_id} has no params_count value")
+
+    model_json = row.get("model_json")
+    if not isinstance(model_json, dict):
+        raise SupabaseError(f"Model {model_id} has no model_json payload")
+
+    name = row.get("model_name") or ""
+    model_type = row.get("model_type") or ""
+
+    return ModelFullRecord(
+        id=str(row["id"]),
+        params_count=int(params_count),
+        name=str(name),
+        model_type=str(model_type),
+        model_json=model_json,
     )
 
 
@@ -244,6 +281,26 @@ class EncryptedDatasetRecord:
     user_id: str
 
 
+@dataclass
+class EncryptedDatasetFullRecord:
+    id: int
+    encrypt_id: str
+    encrypt_path: str
+    user_id: str
+    fhe_key_id: int
+    fhe_key_storage_path: str
+    model_id: int
+    model_name: str
+    model_type: str
+    slots: int
+    params_count: int
+    rows_per_ciphertext: int
+    total_rows: int
+    ciphertext_count: int
+    columns: list[str]
+    ciphertext_files: list[str]
+
+
 def resolve_fhe_encrypted_dataset(
     *, dataset_id: int, access_token: str
 ) -> EncryptedDatasetRecord:
@@ -259,6 +316,48 @@ def resolve_fhe_encrypted_dataset(
         encrypt_id=str(row["encrypt_id"]),
         encrypt_path=str(row.get("encrypt_path", "")),
         user_id=str(row["user_id"]),
+    )
+
+
+def resolve_fhe_encrypted_dataset_full(
+    *, dataset_id: int, access_token: str
+) -> EncryptedDatasetFullRecord:
+    row = _get_single_row(
+        table=SUPABASE_ENCRYPTED_DATASETS_TABLE,
+        access_token=access_token,
+        filters={"id": str(dataset_id)},
+        select=(
+            "id,encrypt_id,encrypt_path,user_id,fhe_key_id,fhe_key_storage_path,"
+            "model_id,model_name,model_type,slots,params_count,rows_per_ciphertext,"
+            "total_rows,ciphertext_count,columns,ciphertext_files"
+        ),
+        not_found_message=f"Encrypted dataset not found: {dataset_id}",
+    )
+
+    columns = row.get("columns") or []
+    ciphertext_files = row.get("ciphertext_files") or []
+    if not isinstance(columns, list) or not columns:
+        raise SupabaseError(f"Encrypted dataset {dataset_id} has no columns")
+    if not isinstance(ciphertext_files, list) or not ciphertext_files:
+        raise SupabaseError(f"Encrypted dataset {dataset_id} has no ciphertext_files")
+
+    return EncryptedDatasetFullRecord(
+        id=int(row["id"]),
+        encrypt_id=str(row["encrypt_id"]),
+        encrypt_path=str(row.get("encrypt_path", "")),
+        user_id=str(row["user_id"]),
+        fhe_key_id=int(row["fhe_key_id"]),
+        fhe_key_storage_path=str(row["fhe_key_storage_path"]),
+        model_id=int(row["model_id"]),
+        model_name=str(row.get("model_name", "")),
+        model_type=str(row.get("model_type", "")),
+        slots=int(row["slots"]),
+        params_count=int(row["params_count"]),
+        rows_per_ciphertext=int(row["rows_per_ciphertext"]),
+        total_rows=int(row["total_rows"]),
+        ciphertext_count=int(row["ciphertext_count"]),
+        columns=[str(column) for column in columns],
+        ciphertext_files=[str(path) for path in ciphertext_files],
     )
 
 
