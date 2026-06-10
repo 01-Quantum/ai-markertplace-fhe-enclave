@@ -1,6 +1,5 @@
 import json
 import logging
-import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,18 +16,10 @@ _RESULT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @dataclass
-class DecryptedRow:
-    row_index: int
-    linear_score: float
-    probability: float | None = None
-    predicted_class: str | None = None
-
-
-@dataclass
 class DecryptResultsOutput:
     result_id: str
     manifest: dict[str, Any]
-    rows: list[DecryptedRow]
+    decrypted_values: list[float]
 
 
 def _validate_result_id(result_id: str) -> str:
@@ -54,45 +45,19 @@ def _read_ciphertext(path: Path):
     return ciphertext
 
 
-def _sigmoid(value: float) -> float:
-    if value >= 0:
-        z = math.exp(-value)
-        return 1.0 / (1.0 + z)
-    z = math.exp(value)
-    return z / (1.0 + z)
-
-
-def _predict_class(
-    *,
-    probability: float,
-    threshold: float,
-    classes: list[str],
-) -> str | None:
-    if not classes:
-        return None
-    class_index = 0 if probability >= threshold else 1
-    return classes[class_index] if class_index < len(classes) else classes[0]
-
-
-def _extract_linear_scores(
+def _extract_decrypted_values(
     packed_values: list[float],
     *,
     params_count: int,
-    row_offset: int,
     rows_in_chunk: int,
-) -> list[DecryptedRow]:
-    rows: list[DecryptedRow] = []
+) -> list[float]:
+    scores: list[float] = []
     for local_row in range(rows_in_chunk):
         slot_index = local_row * params_count
         if slot_index >= len(packed_values):
             break
-        rows.append(
-            DecryptedRow(
-                row_index=row_offset + local_row,
-                linear_score=float(packed_values[slot_index]),
-            )
-        )
-    return rows
+        scores.append(float(packed_values[slot_index]))
+    return scores
 
 
 def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
@@ -114,15 +79,6 @@ def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
     if not isinstance(result_files, list) or not result_files:
         raise ValueError("Result manifest is missing result_files")
 
-    threshold = manifest.get("threshold")
-    threshold_value = float(threshold) if isinstance(threshold, (int, float)) else None
-    classes_raw = manifest.get("classes") or []
-    classes = (
-        [value for value in classes_raw if isinstance(value, str)]
-        if isinstance(classes_raw, list)
-        else []
-    )
-
     logger.info(
         "[decrypt] manifest summary: encrypted_dataset_id=%s slots=%s params_count=%s "
         "rows_per_ciphertext=%s total_rows=%s result_files=%s fhe_key_storage_path=%s",
@@ -141,14 +97,14 @@ def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
         raise ValueError(str(exc)) from exc
 
     result_dir = RESULTS_DIR / result_id
-    decrypted_rows: list[DecryptedRow] = []
+    decrypted_values: list[float] = []
 
     for chunk_index, result_name in enumerate(result_files):
         result_path = result_dir / str(result_name)
         if not result_path.exists():
             raise ValueError(f"Missing result ciphertext file: {result_path}")
 
-        rows_remaining = total_rows - len(decrypted_rows)
+        rows_remaining = total_rows - len(decrypted_values)
         rows_in_chunk = min(rows_per_ciphertext, rows_remaining)
         if rows_in_chunk <= 0:
             break
@@ -159,7 +115,7 @@ def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
             len(result_files),
             result_path,
             rows_in_chunk,
-            len(decrypted_rows),
+            len(decrypted_values),
         )
 
         ciphertext = _read_ciphertext(result_path)
@@ -167,52 +123,34 @@ def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
         plaintext.SetLength(slots)
         packed_values = plaintext.GetRealPackedValue()
 
-        chunk_rows = _extract_linear_scores(
+        chunk_scores = _extract_decrypted_values(
             packed_values,
             params_count=params_count,
-            row_offset=len(decrypted_rows),
             rows_in_chunk=rows_in_chunk,
         )
 
-        if threshold_value is not None and classes:
-            for row in chunk_rows:
-                row.probability = _sigmoid(row.linear_score)
-                row.predicted_class = _predict_class(
-                    probability=row.probability,
-                    threshold=threshold_value,
-                    classes=classes,
-                )
-
         logger.info(
-            "[decrypt] chunk %s/%s: extracted %s row score(s) preview=%s",
+            "[decrypt] chunk %s/%s: extracted %s score(s) preview=%s",
             chunk_index + 1,
             len(result_files),
-            len(chunk_rows),
-            [
-                {
-                    "row_index": row.row_index,
-                    "linear_score": round(row.linear_score, 6),
-                    "probability": round(row.probability, 6) if row.probability is not None else None,
-                    "predicted_class": row.predicted_class,
-                }
-                for row in chunk_rows[:3]
-            ],
+            len(chunk_scores),
+            [round(score, 6) for score in chunk_scores[:3]],
         )
-        decrypted_rows.extend(chunk_rows)
+        decrypted_values.extend(chunk_scores)
 
-    if len(decrypted_rows) != total_rows:
+    if len(decrypted_values) != total_rows:
         raise ValueError(
-            f"Expected {total_rows} decrypted rows, extracted {len(decrypted_rows)}"
+            f"Expected {total_rows} decrypted scores, extracted {len(decrypted_values)}"
         )
 
     logger.info(
         "[decrypt] decrypt_inference_results complete: result_id=%s total_rows=%s",
         result_id,
-        len(decrypted_rows),
+        len(decrypted_values),
     )
 
     return DecryptResultsOutput(
         result_id=result_id,
         manifest=manifest,
-        rows=decrypted_rows,
+        decrypted_values=decrypted_values,
     )

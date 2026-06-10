@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import UUID
 
@@ -274,6 +275,39 @@ def insert_fhe_encrypted_dataset(
     if isinstance(data, dict):
         return data
     return row
+
+
+def submit_fhe_encrypted_dataset(
+    *,
+    dataset_id: int,
+    access_token: str,
+    status: str = "inference_complete",
+) -> Dict[str, Any]:
+    """Mark an encrypted dataset as submitted after inference completes."""
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    patch: Dict[str, Any] = {
+        "submitted_at": submitted_at,
+        "status": status,
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_DATASETS_TABLE}?id=eq.{dataset_id}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.patch(url, headers=_user_headers(access_token), json=patch)
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase update failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    raise SupabaseNotFoundError(f"Encrypted dataset not found: {dataset_id}")
 
 
 def insert_fhe_encrypted_result(

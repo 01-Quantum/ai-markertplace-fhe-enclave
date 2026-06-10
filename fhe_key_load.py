@@ -1,7 +1,13 @@
 import logging
 from pathlib import Path
 
-from openfhe import BINARY, DeserializeCryptoContext, DeserializePrivateKey, DeserializePublicKey
+from openfhe import (
+    BINARY,
+    ClearEvalMultKeys,
+    DeserializeCryptoContext,
+    DeserializePrivateKey,
+    DeserializePublicKey,
+)
 
 from key_storage import FILE_NAMES, key_dir
 
@@ -10,6 +16,13 @@ logger = logging.getLogger("fhe_vault")
 
 class KeyLoadError(Exception):
     pass
+
+
+def _clear_eval_keys(cc) -> None:
+    """OpenFHE stores eval keys globally; clear before reload to avoid keyTag collisions."""
+    ClearEvalMultKeys()
+    cc.ClearEvalAutomorphismKeys()
+    logger.debug("[keys] cleared global eval mult and automorphism keys")
 
 
 def load_encryption_context(fhe_key_id: str):
@@ -75,6 +88,9 @@ def load_inference_context(fhe_key_id: str):
     public_key, pk_ok = DeserializePublicKey(str(pk_path), BINARY)
     if not pk_ok:
         raise KeyLoadError(f"Failed to deserialize public key from {pk_path}")
+
+    logger.info("[inference] clearing cached eval keys before reload")
+    _clear_eval_keys(cc)
 
     logger.info("[inference] deserializing eval mult keys: %s", eval_mult_path)
     if not cc.DeserializeEvalMultKey(str(eval_mult_path), BINARY):

@@ -36,6 +36,7 @@ from supabase_db import (
     insert_fhe_encrypted_dataset,
     insert_fhe_encrypted_result,
     insert_fhe_key_record,
+    submit_fhe_encrypted_dataset,
 )
 
 app = FastAPI(
@@ -120,13 +121,7 @@ class FheInferenceResponse(BaseModel):
     status: str
     manifest: dict
     supabase_record: dict
-
-
-class FheDecryptRowResult(BaseModel):
-    row_index: int
-    linear_score: float
-    probability: float | None = None
-    predicted_class: str | None = None
+    dataset_supabase_record: dict
 
 
 class FheDecryptResultsRequest(BaseModel):
@@ -140,14 +135,7 @@ class FheDecryptResultsRequest(BaseModel):
 
 class FheDecryptResultsResponse(BaseModel):
     result_id: str
-    encrypted_dataset_id: int
-    model_id: int
-    model_name: str
-    total_rows: int
-    params_count: int
-    threshold: float | None = None
-    classes: list[str]
-    rows: list[FheDecryptRowResult]
+    decrypted_values: list[float]
     status: str
 
 
@@ -659,17 +647,42 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         )
         raise HTTPException(
             status_code=500,
-            detail=f"Inference succeeded but database save failed: {exc}",
+            detail=f"Inference result save failed: {exc}",
+        ) from exc
+
+    try:
+        dataset_supabase_record = submit_fhe_encrypted_dataset(
+            dataset_id=dataset.id,
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError as exc:
+        logger.error(
+            "[inference] dataset submit update not found id=%s: %s",
+            dataset.id,
+            exc,
+        )
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        logger.error(
+            "[inference] dataset submit update failed id=%s: %s",
+            dataset.id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Inference succeeded but dataset submit update failed: {exc}",
         ) from exc
 
     logger.info(
         "[inference] API complete encrypted_dataset_id=%s model_id=%s result_id=%s "
-        "supabase_id=%s params_count=%s total_rows=%s result_count=%s output_dir=%s "
-        "manifest_file=%s",
+        "result_supabase_id=%s dataset_submitted_at=%s dataset_status=%s "
+        "params_count=%s total_rows=%s result_count=%s output_dir=%s manifest_file=%s",
         body.encrypted_dataset_id,
         dataset.model_id,
         inference_result.result_id,
         supabase_record.get("id"),
+        dataset_supabase_record.get("submitted_at"),
+        dataset_supabase_record.get("status"),
         dataset.params_count,
         dataset.total_rows,
         len(inference_result.result_files),
@@ -692,6 +705,7 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         status="completed",
         manifest=manifest,
         supabase_record=supabase_record,
+        dataset_supabase_record=dataset_supabase_record,
     )
 
 
@@ -715,52 +729,18 @@ def fhe_decrypt_results(body: FheDecryptResultsRequest, request: Request):
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    manifest = decrypt_output.manifest
-    threshold = manifest.get("threshold")
-    classes_raw = manifest.get("classes") or []
-    classes = (
-        [value for value in classes_raw if isinstance(value, str)]
-        if isinstance(classes_raw, list)
-        else []
-    )
-
-    rows = [
-        FheDecryptRowResult(
-            row_index=row.row_index,
-            linear_score=row.linear_score,
-            probability=row.probability,
-            predicted_class=row.predicted_class,
-        )
-        for row in decrypt_output.rows
-    ]
+    decrypted_values = decrypt_output.decrypted_values
 
     logger.info(
-        "[decrypt] API complete result_id=%s encrypted_dataset_id=%s total_rows=%s "
-        "preview=%s",
+        "[decrypt] API complete result_id=%s total_rows=%s preview=%s",
         body.result_id,
-        manifest.get("encrypted_dataset_id"),
-        len(rows),
-        [
-            {
-                "row_index": row.row_index,
-                "linear_score": round(row.linear_score, 6),
-                "probability": round(row.probability, 6) if row.probability is not None else None,
-                "predicted_class": row.predicted_class,
-            }
-            for row in rows[:3]
-        ],
+        len(decrypted_values),
+        [round(score, 6) for score in decrypted_values[:3]],
     )
 
     return FheDecryptResultsResponse(
         result_id=body.result_id,
-        encrypted_dataset_id=int(manifest.get("encrypted_dataset_id", 0)),
-        model_id=int(manifest.get("model_id", 0)),
-        model_name=str(manifest.get("model_name", "")),
-        total_rows=len(rows),
-        params_count=int(manifest.get("params_count", 0)),
-        threshold=float(threshold) if isinstance(threshold, (int, float)) else None,
-        classes=classes,
-        rows=rows,
+        decrypted_values=decrypted_values,
         status="decrypted",
     )
 
