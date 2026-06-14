@@ -14,6 +14,7 @@ from typing import Any
 from openfhe import BINARY, Serialize, SerializeToFile
 
 from fhe_key_load import load_encryption_context
+from fhe_mem import log_memory
 
 logger = logging.getLogger("fhe_vault")
 
@@ -374,34 +375,35 @@ def encrypt_csv(
     csv: CsvPreprocessResult,
     plan: EncryptPlan,
 ) -> EncryptResult:
-    cc, public_key = load_encryption_context(fhe_key_storage_path)
-
+    is_tree = plan.client_metadata is not None
     encrypt_id = secrets.token_hex(16)
     output_dir = ENCRYPTED_DIR / encrypt_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    is_tree = plan.client_metadata is not None
     ciphertext_files: list[str] = []
-    for chunk_index, start in enumerate(
-        range(0, csv.total_rows, plan.rows_per_ciphertext)
-    ):
-        chunk_rows = csv.data_rows[start : start + plan.rows_per_ciphertext]
-        if is_tree:
-            values = _pack_tree_chunk(
-                chunk_rows,
-                plan.columns,
-                plan.client_metadata,
-                plan.slots,
-            )
-        else:
-            values = _pack_linear_chunk(chunk_rows, plan.params_count, plan.slots)
+    with log_memory(f"encrypt({'tree' if is_tree else 'linear'}, rows={csv.total_rows})"):
+        cc, public_key = load_encryption_context(fhe_key_storage_path)
 
-        plaintext = cc.MakeCKKSPackedPlaintext(values)
-        ciphertext = cc.Encrypt(public_key, plaintext)
+        for chunk_index, start in enumerate(
+            range(0, csv.total_rows, plan.rows_per_ciphertext)
+        ):
+            chunk_rows = csv.data_rows[start : start + plan.rows_per_ciphertext]
+            if is_tree:
+                values = _pack_tree_chunk(
+                    chunk_rows,
+                    plan.columns,
+                    plan.client_metadata,
+                    plan.slots,
+                )
+            else:
+                values = _pack_linear_chunk(chunk_rows, plan.params_count, plan.slots)
 
-        ct_path = output_dir / f"ciphertext_{chunk_index:04d}.bin"
-        _write_ciphertext(ct_path, ciphertext)
-        ciphertext_files.append(str(ct_path))
+            plaintext = cc.MakeCKKSPackedPlaintext(values)
+            ciphertext = cc.Encrypt(public_key, plaintext)
+
+            ct_path = output_dir / f"ciphertext_{chunk_index:04d}.bin"
+            _write_ciphertext(ct_path, ciphertext)
+            ciphertext_files.append(str(ct_path))
 
     manifest: dict[str, Any] = {
         "encrypt_path": str(output_dir),

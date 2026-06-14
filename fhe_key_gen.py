@@ -3,6 +3,8 @@ from typing import Dict, List, Tuple
 
 from openfhe import *
 
+from fhe_mem import log_memory
+
 RING_BASE = 15
 RING_DIM = 2**RING_BASE
 NUM_SLOTS = 2 ** (RING_BASE - 1)
@@ -66,6 +68,15 @@ def fhe_key_gen(
 
     mult_depth = effective_mult_depth(mult_depth)
 
+    with log_memory(f"keygen(mult_depth={mult_depth})"):
+        return _fhe_key_gen(key_id, mult_depth, eval_at_index_keys)
+
+
+def _fhe_key_gen(
+    key_id: str,
+    mult_depth: int,
+    eval_at_index_keys: List[int],
+) -> Tuple[bytes, bytes, bytes, bytes, bytes]:
     #ClearEvalMultKeys()
     security_level = SecurityLevel.HEStd_NotSet
 

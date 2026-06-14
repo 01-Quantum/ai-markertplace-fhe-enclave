@@ -10,6 +10,7 @@ from openfhe import BINARY, DeserializeCiphertext, Serialize, SerializeToFile
 
 from fhe_encrypt_service import ENCRYPTED_DIR
 from fhe_key_load import KeyLoadError, load_inference_context
+from fhe_mem import log_memory
 
 logger = logging.getLogger("fhe_vault")
 
@@ -443,44 +444,45 @@ def run_inference(
         "[inference] step 7/8: processing %s ciphertext chunk(s)",
         len(ciphertext_files),
     )
-    for chunk_index, ciphertext_name in enumerate(ciphertext_files):
-        input_path = dataset_dir / ciphertext_name
-        logger.info(
-            "[inference] chunk %s/%s: input=%s",
-            chunk_index + 1,
-            len(ciphertext_files),
-            input_path,
-        )
-        if not input_path.exists():
-            raise ValueError(f"Missing ciphertext file: {input_path}")
+    with log_memory(f"inference(linear, rows={total_rows})"):
+        for chunk_index, ciphertext_name in enumerate(ciphertext_files):
+            input_path = dataset_dir / ciphertext_name
+            logger.info(
+                "[inference] chunk %s/%s: input=%s",
+                chunk_index + 1,
+                len(ciphertext_files),
+                input_path,
+            )
+            if not input_path.exists():
+                raise ValueError(f"Missing ciphertext file: {input_path}")
 
-        ciphertext = _read_ciphertext(input_path)
-        logger.info(
-            "[inference] chunk %s/%s: running batched linear score "
-            "(rows_in_chunk=%s, score_slot_stride=%s)",
-            chunk_index + 1,
-            len(ciphertext_files),
-            min(plan.rows_per_ciphertext, plan.total_rows - chunk_index * plan.rows_per_ciphertext),
-            plan.params_count,
-        )
-        result_ct = compute_batched_linear_scores(
-            cc,
-            ciphertext,
-            weights=aligned_weights,
-            intercept=model.intercept,
-            plan=plan,
-        )
+            ciphertext = _read_ciphertext(input_path)
+            logger.info(
+                "[inference] chunk %s/%s: running batched linear score "
+                "(rows_in_chunk=%s, score_slot_stride=%s)",
+                chunk_index + 1,
+                len(ciphertext_files),
+                min(plan.rows_per_ciphertext, plan.total_rows - chunk_index * plan.rows_per_ciphertext),
+                plan.params_count,
+            )
+            result_ct = compute_batched_linear_scores(
+                cc,
+                ciphertext,
+                weights=aligned_weights,
+                intercept=model.intercept,
+                plan=plan,
+            )
 
-        result_name = f"result_{chunk_index:04d}.bin"
-        result_path = output_dir / result_name
-        _write_ciphertext(result_path, result_ct)
-        result_files.append(result_name)
-        logger.info(
-            "[inference] chunk %s/%s: wrote result ciphertext: %s",
-            chunk_index + 1,
-            len(ciphertext_files),
-            result_path,
-        )
+            result_name = f"result_{chunk_index:04d}.bin"
+            result_path = output_dir / result_name
+            _write_ciphertext(result_path, result_ct)
+            result_files.append(result_name)
+            logger.info(
+                "[inference] chunk %s/%s: wrote result ciphertext: %s",
+                chunk_index + 1,
+                len(ciphertext_files),
+                result_path,
+            )
 
     manifest = {
         "result_id": result_id,

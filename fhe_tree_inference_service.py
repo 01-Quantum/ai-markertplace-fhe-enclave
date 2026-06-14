@@ -10,6 +10,7 @@ from openfhe import BINARY, DeserializeCiphertext, Serialize, SerializeToFile
 from fhe_encrypt_service import ENCRYPTED_DIR
 from fhe_inference_service import InferenceResult, RESULTS_DIR
 from fhe_key_load import KeyLoadError, load_inference_context
+from fhe_mem import log_memory
 from fhe_tree_eval import approx_comp, enc_tree_evaluator
 
 logger = logging.getLogger("fhe_vault")
@@ -189,11 +190,6 @@ def run_tree_inference(
         columns=columns,
     )
 
-    try:
-        cc, public_key = load_inference_context(fhe_key_storage_path)
-    except KeyLoadError as exc:
-        raise ValueError(str(exc)) from exc
-
     dataset_dir = ENCRYPTED_DIR / encrypt_id
     if not dataset_dir.exists():
         raise ValueError(f"Encrypted dataset files not found at {dataset_dir}")
@@ -203,38 +199,46 @@ def run_tree_inference(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result_files: list[str] = []
-    for chunk_index, ciphertext_name in enumerate(ciphertext_files):
-        input_path = dataset_dir / ciphertext_name
-        if not input_path.exists():
-            raise ValueError(f"Missing ciphertext file: {input_path}")
+    with log_memory(
+        f"tree-inference(depth={plan.tree_depth}, rows={total_rows})"
+    ):
+        try:
+            cc, public_key = load_inference_context(fhe_key_storage_path)
+        except KeyLoadError as exc:
+            raise ValueError(str(exc)) from exc
 
-        rows_remaining = total_rows - chunk_index * plan.rows_per_ciphertext
-        num_samples = min(plan.rows_per_ciphertext, rows_remaining)
-        if num_samples <= 0:
-            break
+        for chunk_index, ciphertext_name in enumerate(ciphertext_files):
+            input_path = dataset_dir / ciphertext_name
+            if not input_path.exists():
+                raise ValueError(f"Missing ciphertext file: {input_path}")
 
-        logger.info(
-            "[tree-inference] chunk %s/%s: input=%s num_samples=%s",
-            chunk_index + 1,
-            len(ciphertext_files),
-            input_path,
-            num_samples,
-        )
+            rows_remaining = total_rows - chunk_index * plan.rows_per_ciphertext
+            num_samples = min(plan.rows_per_ciphertext, rows_remaining)
+            if num_samples <= 0:
+                break
 
-        ciphertext = _read_ciphertext(input_path)
-        result_ct = server_evaluate_tree(
-            cc,
-            public_key,
-            ciphertext,
-            num_samples=num_samples,
-            server_bundle=server_bundle,
-            num_slots=plan.slots,
-        )
+            logger.info(
+                "[tree-inference] chunk %s/%s: input=%s num_samples=%s",
+                chunk_index + 1,
+                len(ciphertext_files),
+                input_path,
+                num_samples,
+            )
 
-        result_name = f"result_{chunk_index:04d}.bin"
-        result_path = output_dir / result_name
-        _write_ciphertext(result_path, result_ct)
-        result_files.append(result_name)
+            ciphertext = _read_ciphertext(input_path)
+            result_ct = server_evaluate_tree(
+                cc,
+                public_key,
+                ciphertext,
+                num_samples=num_samples,
+                server_bundle=server_bundle,
+                num_slots=plan.slots,
+            )
+
+            result_name = f"result_{chunk_index:04d}.bin"
+            result_path = output_dir / result_name
+            _write_ciphertext(result_path, result_ct)
+            result_files.append(result_name)
 
     manifest = {
         "result_id": result_id,
