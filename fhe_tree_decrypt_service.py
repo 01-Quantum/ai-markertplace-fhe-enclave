@@ -21,6 +21,14 @@ def _path_index_from_scores(scores: list[float]) -> int:
     return min(range(len(scores)), key=lambda index: scores[index])
 
 
+def _load_label_lut(manifest: dict) -> dict[int, str]:
+    """Path-index -> leaf label map, written into the result manifest at inference."""
+    raw = manifest.get("leaf_labels_by_path_index") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {int(key): str(value) for key, value in raw.items()}
+
+
 def decrypt_tree_inference_results(
     *,
     result_id: str,
@@ -42,6 +50,8 @@ def decrypt_tree_inference_results(
     if not isinstance(result_files, list) or not result_files:
         raise ValueError("Result manifest is missing result_files")
 
+    label_lut = _load_label_lut(manifest)
+
     try:
         cc, secret_key = load_decryption_context(fhe_key_storage_path)
     except KeyLoadError as exc:
@@ -49,6 +59,7 @@ def decrypt_tree_inference_results(
 
     result_dir = RESULTS_DIR / result_id
     decrypted_values: list[float] = []
+    predicted_labels: list[str] = []
 
     for chunk_index, result_name in enumerate(result_files):
         result_path = result_dir / str(result_name)
@@ -68,14 +79,17 @@ def decrypt_tree_inference_results(
         for sample_index in range(rows_in_chunk):
             start = sample_index * num_paths
             chunk_scores = flat[start : start + num_paths]
-            decrypted_values.append(float(_path_index_from_scores(chunk_scores)))
+            path_index = _path_index_from_scores(chunk_scores)
+            decrypted_values.append(float(path_index))
+            predicted_labels.append(label_lut.get(path_index, str(path_index)))
 
         logger.info(
-            "[tree-decrypt] chunk %s/%s: extracted %s path index(es) preview=%s",
+            "[tree-decrypt] chunk %s/%s: decoded %s sample(s) preview path=%s label=%s",
             chunk_index + 1,
             len(result_files),
             rows_in_chunk,
             [int(value) for value in decrypted_values[:3]],
+            predicted_labels[:3],
         )
 
     if len(decrypted_values) != total_rows:
@@ -93,4 +107,5 @@ def decrypt_tree_inference_results(
         result_id=result_id,
         manifest=manifest,
         decrypted_values=decrypted_values,
+        predicted_labels=predicted_labels,
     )

@@ -20,6 +20,9 @@ class DecryptResultsOutput:
     result_id: str
     manifest: dict[str, Any]
     decrypted_values: list[float]
+    # Decision-tree only: per-sample predicted leaf label (argmin of path scores
+    # mapped through the model's leaf label LUT). None for logistic models.
+    predicted_labels: list[str] | None = None
 
 
 def _validate_result_id(result_id: str) -> str:

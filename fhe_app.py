@@ -154,6 +154,7 @@ class FheDecryptResultsRequest(BaseModel):
 class FheDecryptResultsResponse(BaseModel):
     result_id: str
     decrypted_values: list[float]
+    predicted_labels: list[str] | None = None
     status: str
 
 
@@ -869,17 +870,20 @@ def fhe_decrypt_results(body: FheDecryptResultsRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     decrypted_values = decrypt_output.decrypted_values
+    predicted_labels = decrypt_output.predicted_labels
 
     logger.info(
-        "[decrypt] API complete result_id=%s total_rows=%s preview=%s",
+        "[decrypt] API complete result_id=%s total_rows=%s preview=%s labels=%s",
         body.result_id,
         len(decrypted_values),
         [round(score, 6) for score in decrypted_values[:3]],
+        (predicted_labels[:3] if predicted_labels else None),
     )
 
     return FheDecryptResultsResponse(
         result_id=body.result_id,
         decrypted_values=decrypted_values,
+        predicted_labels=predicted_labels,
         status="decrypted",
     )
 
