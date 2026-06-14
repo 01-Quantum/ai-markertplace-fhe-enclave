@@ -22,6 +22,7 @@ from fhe_encrypt_service import (
 )
 from fhe_decrypt_service import decrypt_inference_results
 from fhe_inference_service import RESULTS_DIR, run_inference
+from fhe_tree_publish_service import publish_decision_tree
 from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
 from supabase_db import (
@@ -37,6 +38,7 @@ from supabase_db import (
     insert_fhe_encrypted_result,
     insert_fhe_key_record,
     submit_fhe_encrypted_dataset,
+    update_model_tree_publish,
 )
 
 app = FastAPI(
@@ -122,6 +124,21 @@ class FheInferenceResponse(BaseModel):
     manifest: dict
     supabase_record: dict
     dataset_supabase_record: dict
+
+
+class FheTreePublishRequest(BaseModel):
+    model_id: int = Field(..., gt=0, description="Supabase models row id")
+
+
+class FheTreePublishResponse(BaseModel):
+    model_id: int
+    params_count: int
+    tree_depth: int
+    num_nodes: int
+    num_paths: int
+    client_metadata: dict
+    status: str
+    supabase_record: dict
 
 
 class FheDecryptResultsRequest(BaseModel):
@@ -706,6 +723,85 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
         manifest=manifest,
         supabase_record=supabase_record,
         dataset_supabase_record=dataset_supabase_record,
+    )
+
+
+@router.post("/fhe-tree-publish", response_model=FheTreePublishResponse)
+def fhe_tree_publish(body: FheTreePublishRequest, request: Request):
+    user_id = _user_id(request)
+    access_token = _access_token(request)
+
+    logger.info(
+        "fhe-tree-publish request user_id=%s model_id=%s",
+        user_id,
+        body.model_id,
+    )
+
+    try:
+        model = resolve_model_with_json(
+            model_id=str(body.model_id),
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if model.model_type != "tree":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {body.model_id} is type '{model.model_type}', expected 'tree'",
+        )
+
+    try:
+        publish_result = publish_decision_tree(model_json=model.model_json)
+    except ValueError as exc:
+        logger.error(
+            "[tree-publish] failed: model_id=%s error=%s",
+            body.model_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        supabase_record = update_model_tree_publish(
+            model_id=body.model_id,
+            model_json=publish_result["published_model_json"],
+            params_count=publish_result["params_count"],
+            client_metadata=publish_result["client_metadata"],
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        logger.error(
+            "[tree-publish] Supabase update failed model_id=%s: %s",
+            body.model_id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Tree compiled but database update failed: {exc}",
+        ) from exc
+
+    logger.info(
+        "[tree-publish] complete model_id=%s params_count=%s tree_depth=%s "
+        "feature_order=%s",
+        body.model_id,
+        publish_result["params_count"],
+        publish_result["tree_depth"],
+        publish_result["client_metadata"].get("feature_order"),
+    )
+
+    return FheTreePublishResponse(
+        model_id=body.model_id,
+        params_count=publish_result["params_count"],
+        tree_depth=publish_result["tree_depth"],
+        num_nodes=publish_result["num_nodes"],
+        num_paths=publish_result["num_paths"],
+        client_metadata=publish_result["client_metadata"],
+        status="published",
+        supabase_record=supabase_record,
     )
 
 

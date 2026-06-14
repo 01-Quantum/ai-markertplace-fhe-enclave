@@ -459,6 +459,42 @@ def resolve_fhe_encrypted_dataset_full(
     )
 
 
+def update_model_tree_publish(
+    *,
+    model_id: int,
+    model_json: Dict[str, Any],
+    params_count: int,
+    client_metadata: Dict[str, Any],
+    access_token: str,
+) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    patch: Dict[str, Any] = {
+        "model_json": model_json,
+        "params_count": params_count,
+        "client_metadata": client_metadata,
+        "published": True,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_MODELS_TABLE}?id=eq.{model_id}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.patch(url, headers=_user_headers(access_token), json=patch)
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase update failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    raise SupabaseNotFoundError(f"Model not found: {model_id}")
+
+
 def delete_fhe_encrypted_dataset(*, dataset_id: int, access_token: str) -> Dict[str, Any]:
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
