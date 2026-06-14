@@ -42,12 +42,14 @@ def _get_single_row(
     filters: Dict[str, str],
     select: str,
     not_found_message: str,
+    order: str | None = None,
 ) -> Dict[str, Any]:
     if not SUPABASE_URL or not SUPABASE_ANON_KEY:
         raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
 
     filter_query = "&".join(f"{key}=eq.{value}" for key, value in filters.items())
-    url = f"{SUPABASE_URL}/rest/v1/{table}?{filter_query}&select={select}&limit=1"
+    order_query = f"&order={order}" if order else ""
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{filter_query}&select={select}{order_query}&limit=1"
     with httpx.Client(timeout=30.0) as client:
         response = client.get(url, headers=_user_headers(access_token))
 
@@ -358,6 +360,9 @@ def insert_fhe_encrypted_result(
         "manifest_json": manifest,
         "status": status,
     }
+    elapsed_ms = manifest.get("elapsed_ms")
+    if elapsed_ms is not None:
+        row["elapsed_ms"] = int(elapsed_ms)
 
     url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_RESULTS_TABLE}"
     with httpx.Client(timeout=30.0) as client:
@@ -498,6 +503,88 @@ def update_model_tree_publish(
     if isinstance(data, dict):
         return data
     raise SupabaseNotFoundError(f"Model not found: {model_id}")
+
+
+@dataclass
+class EncryptedResultRecord:
+    id: int
+    result_id: str
+    result_path: str
+    user_id: str
+
+
+def resolve_fhe_encrypted_result(
+    *, result_row_id: int, access_token: str
+) -> EncryptedResultRecord:
+    row = _get_single_row(
+        table=SUPABASE_ENCRYPTED_RESULTS_TABLE,
+        access_token=access_token,
+        filters={"id": str(result_row_id)},
+        select="id,result_id,result_path,user_id",
+        not_found_message=f"Encrypted result not found: {result_row_id}",
+    )
+    return _encrypted_result_from_row(row)
+
+
+def _encrypted_result_from_row(row: Dict[str, Any]) -> EncryptedResultRecord:
+    return EncryptedResultRecord(
+        id=int(row["id"]),
+        result_id=str(row["result_id"]),
+        result_path=str(row.get("result_path") or ""),
+        user_id=str(row["user_id"]),
+    )
+
+
+def list_fhe_encrypted_results_for_dataset(
+    *, encrypted_dataset_id: int, access_token: str
+) -> list[EncryptedResultRecord]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    url = (
+        f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_RESULTS_TABLE}"
+        f"?encrypted_dataset_id=eq.{encrypted_dataset_id}"
+        "&select=id,result_id,result_path,user_id"
+        "&order=created_at.desc"
+    )
+    with httpx.Client(timeout=30.0) as client:
+        response = client.get(url, headers=_user_headers(access_token))
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase query failed ({response.status_code}): {response.text}"
+        )
+
+    data = response.json()
+    if not isinstance(data, list) or not data:
+        return []
+    return [_encrypted_result_from_row(row) for row in data]
+
+
+def delete_fhe_encrypted_result(*, result_row_id: int, access_token: str) -> Dict[str, Any]:
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise SupabaseError("SUPABASE_URL and SUPABASE_ANON_KEY must be set")
+
+    url = f"{SUPABASE_URL}/rest/v1/{SUPABASE_ENCRYPTED_RESULTS_TABLE}?id=eq.{result_row_id}"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.delete(url, headers=_user_headers(access_token))
+
+    if response.status_code >= 400:
+        raise SupabaseError(
+            f"Supabase delete failed ({response.status_code}): {response.text}"
+        )
+
+    if not response.content:
+        return {"id": result_row_id}
+
+    data = response.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list) and not data:
+        raise SupabaseNotFoundError(f"Encrypted result not found: {result_row_id}")
+    return {"id": result_row_id}
 
 
 def delete_fhe_encrypted_dataset(*, dataset_id: int, access_token: str) -> Dict[str, Any]:

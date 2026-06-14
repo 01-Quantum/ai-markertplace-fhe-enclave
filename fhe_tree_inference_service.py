@@ -201,7 +201,7 @@ def run_tree_inference(
     result_files: list[str] = []
     with log_memory(
         f"tree-inference(depth={plan.tree_depth}, rows={total_rows})"
-    ):
+    ) as mem:
         try:
             cc, public_key = load_inference_context(fhe_key_storage_path)
         except KeyLoadError as exc:
@@ -277,6 +277,7 @@ def run_tree_inference(
         },
         "input_ciphertext_files": ciphertext_files,
         "result_files": result_files,
+        "elapsed_ms": mem["elapsed_ms"],
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

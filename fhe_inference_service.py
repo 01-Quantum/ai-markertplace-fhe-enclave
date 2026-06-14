@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 import secrets
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,8 @@ from fhe_mem import log_memory
 logger = logging.getLogger("fhe_vault")
 
 RESULTS_DIR = Path(os.environ.get("FHE_ENCRYPTED_RESULTS_DIR", "/data/fhe-encrypted-results"))
+
+_RESULT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _preview_floats(values: list[float], *, limit: int = 5) -> str:
@@ -444,7 +448,7 @@ def run_inference(
         "[inference] step 7/8: processing %s ciphertext chunk(s)",
         len(ciphertext_files),
     )
-    with log_memory(f"inference(linear, rows={total_rows})"):
+    with log_memory(f"inference(linear, rows={total_rows})") as mem:
         for chunk_index, ciphertext_name in enumerate(ciphertext_files):
             input_path = dataset_dir / ciphertext_name
             logger.info(
@@ -516,6 +520,7 @@ def run_inference(
         "classes": model.classes,
         "input_ciphertext_files": ciphertext_files,
         "result_files": result_files,
+        "elapsed_ms": mem["elapsed_ms"],
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -544,3 +549,46 @@ def run_inference(
         manifest_file=str(manifest_path),
         manifest=manifest,
     )
+
+
+def _encrypted_result_dir(result_id: str) -> Path:
+    if not _RESULT_ID_RE.fullmatch(result_id):
+        raise ValueError(f"Invalid result_id: {result_id}")
+
+    base = RESULTS_DIR.resolve()
+    target = (RESULTS_DIR / result_id).resolve()
+    if target != base and base not in target.parents:
+        raise ValueError(f"Refusing to delete path outside results dir: {target}")
+    return target
+
+
+def delete_encrypted_result_files(result_id: str) -> bool:
+    """Remove result folder for result_id. Returns True if a directory was removed."""
+    target = _encrypted_result_dir(result_id)
+    if not target.exists():
+        return False
+    if not target.is_dir():
+        raise ValueError(f"Encrypted result path is not a directory: {target}")
+    shutil.rmtree(target)
+    return True
+
+
+def delete_result_files_for_dataset(encrypted_dataset_id: int) -> bool:
+    """Remove any on-disk result folders linked to encrypted_dataset_id."""
+    if not RESULTS_DIR.exists():
+        return False
+
+    deleted_any = False
+    for manifest_path in RESULTS_DIR.glob("*/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        if int(manifest.get("encrypted_dataset_id", -1)) != encrypted_dataset_id:
+            continue
+        result_id = manifest_path.parent.name
+        if delete_encrypted_result_files(result_id):
+            deleted_any = True
+    return deleted_any

@@ -30,8 +30,14 @@ def _rss_mb() -> float:
 def log_memory(operation: str, interval: float = 0.5):
     """
     Log process memory before/after an operation and sample the peak during it.
-    Useful to estimate how much RAM key gen / encrypt / inference need.
+    Yields a stats dict with elapsed_ms (and memory fields) filled on exit.
     """
+    stats: dict[str, float | int | None] = {
+        "elapsed_ms": None,
+        "peak_mb": None,
+        "before_mb": None,
+        "after_mb": None,
+    }
     before = _rss_mb()
     logger.info("[mem] %s start: rss=%.1f MB", operation, before)
 
@@ -47,13 +53,17 @@ def log_memory(operation: str, interval: float = 0.5):
     sampler.start()
     start = time.perf_counter()
     try:
-        yield
+        yield stats
     finally:
         elapsed = time.perf_counter() - start
         stop.set()
         sampler.join(timeout=1.0)
         after = _rss_mb()
         peak = max(peak, after)
+        stats["elapsed_ms"] = int(round(elapsed * 1000))
+        stats["before_mb"] = round(before, 1)
+        stats["peak_mb"] = round(peak, 1)
+        stats["after_mb"] = round(after, 1)
         logger.info(
             "[mem] %s done: took=%.2fs before=%.1f MB peak=%.1f MB after=%.1f MB (delta=%.1f MB)",
             operation,

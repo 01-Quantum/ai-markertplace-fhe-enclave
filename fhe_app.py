@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from logging_config import setup_logging
 
@@ -21,17 +21,26 @@ from fhe_encrypt_service import (
     preprocess_csv,
 )
 from fhe_decrypt_service import decrypt_inference_results
-from fhe_inference_service import RESULTS_DIR, run_inference
+from fhe_inference_service import (
+    RESULTS_DIR,
+    delete_encrypted_result_files,
+    delete_result_files_for_dataset,
+    run_inference,
+)
 from fhe_tree_inference_service import run_tree_inference
 from fhe_tree_publish_service import publish_decision_tree
 from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
 from supabase_db import (
+    EncryptedResultRecord,
     SupabaseError,
     SupabaseNotFoundError,
     delete_fhe_encrypted_dataset,
+    delete_fhe_encrypted_result,
+    list_fhe_encrypted_results_for_dataset,
     resolve_fhe_encrypted_dataset,
     resolve_fhe_encrypted_dataset_full,
+    resolve_fhe_encrypted_result,
     resolve_fhe_key,
     resolve_model,
     resolve_model_with_json,
@@ -98,6 +107,34 @@ class FheDatasetDeleteResponse(BaseModel):
     id: int
     encrypt_id: str
     deleted_files: bool
+    status: str
+
+
+class FheResultDeleteRequest(BaseModel):
+    id: int | None = Field(
+        None,
+        gt=0,
+        description="Supabase fhe_encrypted_results row id",
+    )
+    encrypted_dataset_id: int | None = Field(
+        None,
+        gt=0,
+        description="Delete result(s) linked to this fhe_encrypted_datasets row id",
+    )
+
+    @model_validator(mode="after")
+    def exactly_one_lookup(self) -> "FheResultDeleteRequest":
+        if (self.id is None) == (self.encrypted_dataset_id is None):
+            raise ValueError("Provide exactly one of id or encrypted_dataset_id")
+        return self
+
+
+class FheResultDeleteResponse(BaseModel):
+    id: int | None = None
+    result_id: str | None = None
+    deleted_files: bool
+    deleted_from_supabase: bool
+    deleted_count: int
     status: str
 
 
@@ -194,6 +231,40 @@ def _access_token(request: Request) -> str:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=403, detail="Missing or invalid Authorization header")
     return auth[7:].strip()
+
+
+def _delete_encrypted_result_records(
+    *,
+    results: list[EncryptedResultRecord],
+    access_token: str,
+) -> tuple[bool, bool, int, EncryptedResultRecord | None]:
+    """Delete local result folders and matching Supabase rows."""
+    deleted_files = False
+    deleted_from_supabase = False
+    deleted_count = 0
+    last_deleted: EncryptedResultRecord | None = None
+
+    for result in results:
+        try:
+            if delete_encrypted_result_files(result.result_id):
+                deleted_files = True
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"File cleanup failed: {exc}",
+            ) from exc
+
+        delete_fhe_encrypted_result(
+            result_row_id=result.id,
+            access_token=access_token,
+        )
+        deleted_from_supabase = True
+        deleted_count += 1
+        last_deleted = result
+
+    return deleted_files, deleted_from_supabase, deleted_count, last_deleted
 
 
 @app.exception_handler(RequestValidationError)
@@ -510,6 +581,35 @@ def fhe_dataset_delete(body: FheDatasetDeleteRequest, request: Request):
         raise HTTPException(status_code=403, detail="Not allowed to delete this dataset")
 
     try:
+        associated_results = list_fhe_encrypted_results_for_dataset(
+            encrypted_dataset_id=body.id,
+            access_token=access_token,
+        )
+    except SupabaseNotFoundError:
+        associated_results = []
+    except SupabaseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if associated_results:
+        logger.info(
+            "fhe-dataset-delete removing %s associated result(s) for dataset_id=%s",
+            len(associated_results),
+            body.id,
+        )
+        try:
+            _delete_encrypted_result_records(
+                results=associated_results,
+                access_token=access_token,
+            )
+        except HTTPException:
+            raise
+        except SupabaseError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete associated results: {exc}",
+            ) from exc
+
+    try:
         deleted_files = delete_encrypted_dataset_files(dataset.encrypt_id)
     except ValueError as exc:
         logger.error(
@@ -560,6 +660,116 @@ def fhe_dataset_delete(body: FheDatasetDeleteRequest, request: Request):
         id=int(deleted_row.get("id", body.id)),
         encrypt_id=dataset.encrypt_id,
         deleted_files=deleted_files,
+        status="deleted",
+    )
+
+
+@router.post("/fhe-result-delete", response_model=FheResultDeleteResponse)
+def fhe_result_delete(body: FheResultDeleteRequest, request: Request):
+    user_id = _user_id(request)
+    access_token = _access_token(request)
+
+    logger.info(
+        "fhe-result-delete request user_id=%s result_row_id=%s encrypted_dataset_id=%s",
+        user_id,
+        body.id,
+        body.encrypted_dataset_id,
+    )
+
+    encrypted_dataset_id = body.encrypted_dataset_id
+    if encrypted_dataset_id is not None:
+        try:
+            dataset = resolve_fhe_encrypted_dataset(
+                dataset_id=encrypted_dataset_id,
+                access_token=access_token,
+            )
+        except SupabaseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SupabaseError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        if dataset.user_id != str(user_id):
+            raise HTTPException(status_code=403, detail="Not allowed to delete this result")
+
+    try:
+        if body.id is not None:
+            results = [
+                resolve_fhe_encrypted_result(
+                    result_row_id=body.id,
+                    access_token=access_token,
+                )
+            ]
+        else:
+            results = list_fhe_encrypted_results_for_dataset(
+                encrypted_dataset_id=int(encrypted_dataset_id),
+                access_token=access_token,
+            )
+    except SupabaseNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SupabaseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    for result in results:
+        if result.user_id != str(user_id):
+            raise HTTPException(status_code=403, detail="Not allowed to delete this result")
+
+    deleted_files = False
+    deleted_from_supabase = False
+    deleted_count = 0
+    last_deleted: EncryptedResultRecord | None = None
+
+    if results:
+        try:
+            deleted_files, deleted_from_supabase, deleted_count, last_deleted = (
+                _delete_encrypted_result_records(
+                    results=results,
+                    access_token=access_token,
+                )
+            )
+        except HTTPException:
+            raise
+        except SupabaseNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SupabaseError as exc:
+            logger.error(
+                "fhe-result-delete Supabase delete failed result_row_id=%s encrypted_dataset_id=%s: %s",
+                body.id,
+                body.encrypted_dataset_id,
+                exc,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database delete failed: {exc}",
+            ) from exc
+
+    if encrypted_dataset_id is not None:
+        try:
+            if delete_result_files_for_dataset(int(encrypted_dataset_id)):
+                deleted_files = True
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"File cleanup failed: {exc}",
+            ) from exc
+
+    logger.info(
+        "fhe-result-delete complete deleted_count=%s deleted_files=%s "
+        "deleted_from_supabase=%s last_result_id=%s encrypted_dataset_id=%s",
+        deleted_count,
+        deleted_files,
+        deleted_from_supabase,
+        last_deleted.result_id if last_deleted else None,
+        encrypted_dataset_id,
+    )
+
+    return FheResultDeleteResponse(
+        id=last_deleted.id if last_deleted else None,
+        result_id=last_deleted.result_id if last_deleted else None,
+        deleted_files=deleted_files,
+        deleted_from_supabase=deleted_from_supabase,
+        deleted_count=deleted_count,
         status="deleted",
     )
 
