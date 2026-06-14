@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -8,10 +9,13 @@ import secrets
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from openfhe import BINARY, Serialize, SerializeToFile
 
 from fhe_key_load import load_encryption_context
+
+logger = logging.getLogger("fhe_vault")
 
 ENCRYPTED_DIR = Path(os.environ.get("FHE_ENCRYPTED_DIR", "/data/fhe-encrypted"))
 STRIP_COLUMNS = frozenset({"actual", "expected"})
@@ -35,6 +39,7 @@ class EncryptPlan:
     ciphertext_count: int
     removed_columns: list[str]
     columns: list[str]
+    client_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -137,7 +142,145 @@ def _validate_params_count(params_count: int, csv: CsvPreprocessResult) -> int:
     return column_count
 
 
-def plan_encryption(slots: int, params_count: int, csv: CsvPreprocessResult) -> EncryptPlan:
+def _validate_client_metadata(client_metadata: dict[str, Any]) -> None:
+    for field in (
+        "node_features",
+        "feature_order",
+        "num_paths",
+        "scale",
+        "packing",
+        "crypto",
+    ):
+        if field not in client_metadata:
+            raise ValueError(f"client_metadata is missing required field '{field}'")
+
+
+def _validate_tree_csv(client_metadata: dict[str, Any], csv: CsvPreprocessResult) -> None:
+    if not csv.columns:
+        raise ValueError("CSV has no feature columns after removing label columns")
+
+    required_features = client_metadata["feature_order"]
+    missing = [feature for feature in required_features if feature not in csv.columns]
+    if missing:
+        raise ValueError(
+            f"CSV is missing required tree feature columns {missing}; "
+            f"expected feature_order={required_features}, got columns={csv.columns}"
+        )
+
+    column_index = {name: index for index, name in enumerate(csv.columns)}
+    for row_index, row in enumerate(csv.data_rows, start=1):
+        for feature in required_features:
+            column_index_value = column_index[feature]
+            if column_index_value >= len(row):
+                raise ValueError(
+                    f"CSV row {row_index} is missing value for feature '{feature}'"
+                )
+
+
+def _normalize_tree_value(
+    feature: str,
+    raw: float,
+    normalization: dict[str, Any],
+) -> float:
+    method = normalization.get("method", "none")
+    if method == "none":
+        return float(raw)
+    params = normalization.get("features", {}).get(feature, {})
+    if method == "minmax":
+        lo = float(params["min"])
+        hi = float(params["max"])
+        span = (hi - lo) or 1.0
+        return 2.0 * (float(raw) - lo) / span - 1.0
+    if method == "standard":
+        mean = float(params["mean"])
+        std = float(params.get("std", 1.0) or 1.0)
+        return (float(raw) - mean) / std
+    raise ValueError(f"Unknown normalization method: {method}")
+
+
+def _csv_row_to_feature_map(
+    columns: list[str],
+    row: list[str],
+) -> dict[str, float]:
+    return {column: _parse_float(row[index]) for index, column in enumerate(columns)}
+
+
+def build_tree_block(
+    row: dict[str, float],
+    client_metadata: dict[str, Any],
+) -> list[float]:
+    """Heap-layout input block for one sample, per the client contract."""
+    node_features = client_metadata["node_features"]
+    num_paths = int(client_metadata["num_paths"])
+    normalization = client_metadata.get("normalization", {"method": "none"})
+
+    block = [0.0] * num_paths
+    for index, feature in enumerate(node_features):
+        if feature is not None:
+            block[index] = _normalize_tree_value(feature, row[feature], normalization)
+    return block
+
+
+def plan_tree_encryption(
+    slots: int,
+    client_metadata: dict[str, Any],
+    csv: CsvPreprocessResult,
+) -> EncryptPlan:
+    _validate_client_metadata(client_metadata)
+    _validate_tree_csv(client_metadata, csv)
+
+    slots_per_sample = int(client_metadata["packing"]["slots_per_sample"])
+    max_samples = int(client_metadata["crypto"]["max_samples_per_ciphertext"])
+    if slots_per_sample <= 0:
+        raise ValueError("client_metadata packing.slots_per_sample must be greater than 0")
+    if max_samples <= 0:
+        raise ValueError(
+            "client_metadata crypto.max_samples_per_ciphertext must be greater than 0"
+        )
+
+    packed_slots = slots_per_sample * max_samples
+    if packed_slots > slots:
+        raise ValueError(
+            f"Tree batch requires {packed_slots} slots "
+            f"({max_samples} samples x {slots_per_sample} slots_per_sample) "
+            f"but FHE key only has {slots} slots"
+        )
+
+    ciphertext_count = (
+        math.ceil(csv.total_rows / max_samples) if csv.total_rows > 0 else 0
+    )
+    logger.info(
+        "[encrypt] tree plan: slots_per_sample=%s max_samples=%s rows=%s ciphertexts=%s "
+        "feature_order=%s",
+        slots_per_sample,
+        max_samples,
+        csv.total_rows,
+        ciphertext_count,
+        client_metadata["feature_order"],
+    )
+
+    return EncryptPlan(
+        slots=slots,
+        params_count=slots_per_sample,
+        rows_per_ciphertext=max_samples,
+        total_rows=csv.total_rows,
+        ciphertext_count=ciphertext_count,
+        removed_columns=csv.removed_columns,
+        columns=csv.columns,
+        client_metadata=client_metadata,
+    )
+
+
+def plan_encryption(
+    slots: int,
+    params_count: int,
+    csv: CsvPreprocessResult,
+    *,
+    client_metadata: dict[str, Any] | None = None,
+) -> EncryptPlan:
+    if client_metadata is not None:
+        return plan_tree_encryption(slots, client_metadata, csv)
+
     if params_count <= 0:
         raise ValueError("params_count must be greater than 0")
     if slots <= 0:
@@ -166,7 +309,7 @@ def plan_encryption(slots: int, params_count: int, csv: CsvPreprocessResult) -> 
     )
 
 
-def _pack_chunk(
+def _pack_linear_chunk(
     rows: list[list[str]],
     params_count: int,
     slots: int,
@@ -189,6 +332,35 @@ def _pack_chunk(
     return values
 
 
+def _pack_tree_chunk(
+    rows: list[list[str]],
+    columns: list[str],
+    client_metadata: dict[str, Any],
+    slots: int,
+) -> list[float]:
+    scale = float(client_metadata["scale"])
+    num_paths = int(client_metadata["num_paths"])
+    packed: list[float] = []
+
+    for row in rows:
+        feature_map = _csv_row_to_feature_map(columns, row)
+        block = build_tree_block(feature_map, client_metadata)
+        packed.extend(value * scale for value in block)
+
+    expected = len(rows) * num_paths
+    if len(packed) != expected:
+        raise ValueError(
+            f"Tree packing produced {len(packed)} values, expected {expected}"
+        )
+    if len(packed) > slots:
+        raise ValueError(
+            f"Packed tree values ({len(packed)}) exceed available slots ({slots})"
+        )
+
+    packed.extend([0.0] * (slots - len(packed)))
+    return packed
+
+
 def _write_ciphertext(path: Path, ciphertext) -> None:
     if SerializeToFile(str(path), ciphertext, BINARY):
         return
@@ -208,12 +380,22 @@ def encrypt_csv(
     output_dir = ENCRYPTED_DIR / encrypt_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    is_tree = plan.client_metadata is not None
     ciphertext_files: list[str] = []
     for chunk_index, start in enumerate(
         range(0, csv.total_rows, plan.rows_per_ciphertext)
     ):
         chunk_rows = csv.data_rows[start : start + plan.rows_per_ciphertext]
-        values = _pack_chunk(chunk_rows, plan.params_count, plan.slots)
+        if is_tree:
+            values = _pack_tree_chunk(
+                chunk_rows,
+                plan.columns,
+                plan.client_metadata,
+                plan.slots,
+            )
+        else:
+            values = _pack_linear_chunk(chunk_rows, plan.params_count, plan.slots)
+
         plaintext = cc.MakeCKKSPackedPlaintext(values)
         ciphertext = cc.Encrypt(public_key, plaintext)
 
@@ -221,7 +403,7 @@ def encrypt_csv(
         _write_ciphertext(ct_path, ciphertext)
         ciphertext_files.append(str(ct_path))
 
-    manifest = {
+    manifest: dict[str, Any] = {
         "encrypt_path": str(output_dir),
         "model_id": manifest_ctx.model_id,
         "model_name": manifest_ctx.model_name,
@@ -237,6 +419,15 @@ def encrypt_csv(
         "columns": plan.columns,
         "ciphertext_files": [Path(path).name for path in ciphertext_files],
     }
+    if is_tree:
+        manifest["operation"] = "tree_encrypt"
+        manifest["slots_per_sample"] = plan.params_count
+        manifest["feature_order"] = list(plan.client_metadata["feature_order"])
+        manifest["node_features"] = list(plan.client_metadata["node_features"])
+        manifest["scale"] = float(plan.client_metadata["scale"])
+        manifest["tree_depth"] = int(plan.client_metadata["tree_depth"])
+        manifest["num_paths"] = int(plan.client_metadata["num_paths"])
+
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

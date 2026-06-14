@@ -14,6 +14,10 @@ services:
       - FHE_ENCRYPTED_DIR=/data/fhe-encrypted
       - FHE_ENCRYPTED_RESULTS_DIR=/data/fhe-encrypted-results
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Max decision-tree depth the generated key supports. Higher = more
+      # rotation keys and much higher RAM during key generation. Raise the
+      # Docker Desktop memory allocation if you increase this past 4.
+      - FHE_TREE_MAX_DEPTH=${FHE_TREE_MAX_DEPTH:-4}
     volumes:
       - ./fhe-keys-data:/data/keys
       - ./fhe-encrypted-data:/data/fhe-encrypted

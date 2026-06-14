@@ -62,9 +62,13 @@ def _extract_decrypted_values(
 
 def decrypt_inference_results(*, result_id: str) -> DecryptResultsOutput:
     result_id = _validate_result_id(result_id)
-    logger.info("[decrypt] decrypt_inference_results start: result_id=%s", result_id)
-
     manifest = _load_result_manifest(result_id)
+    if manifest.get("operation") == "tree_eval":
+        from fhe_tree_decrypt_service import decrypt_tree_inference_results
+
+        return decrypt_tree_inference_results(result_id=result_id, manifest=manifest)
+
+    logger.info("[decrypt] decrypt_inference_results start: result_id=%s", result_id)
     logger.info("[decrypt] loaded manifest: path=%s", RESULTS_DIR / result_id / "manifest.json")
 
     fhe_key_storage_path = manifest.get("fhe_key_storage_path")

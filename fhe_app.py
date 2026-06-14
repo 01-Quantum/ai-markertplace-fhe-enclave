@@ -11,7 +11,7 @@ from logging_config import setup_logging
 logger = setup_logging()
 
 from auth import API_PREFIX, supabase_auth_middleware
-from fhe_key_gen import NUM_SLOTS, RING_BASE, RING_DIM
+from fhe_key_gen import NUM_SLOTS, RING_BASE, RING_DIM, effective_mult_depth
 from fhe_encrypt_service import (
     ENCRYPTED_DIR,
     ManifestContext,
@@ -22,6 +22,7 @@ from fhe_encrypt_service import (
 )
 from fhe_decrypt_service import decrypt_inference_results
 from fhe_inference_service import RESULTS_DIR, run_inference
+from fhe_tree_inference_service import run_tree_inference
 from fhe_tree_publish_service import publish_decision_tree
 from fhe_key_load import KeyLoadError
 from key_storage import KEYS_DIR, generate_and_store
@@ -296,12 +297,13 @@ def create_fhe_key(body: CreateFheKeyRequest, request: Request):
     user_id = _user_id(request)
     access_token = _access_token(request)
 
-    key_id = generate_and_store(mult_depth=body.mult_depth)
+    mult_depth = effective_mult_depth(body.mult_depth)
+    key_id = generate_and_store(mult_depth=mult_depth)
     scheme = _scheme_label(body.key_type)
     record = insert_fhe_key_record(
         key_name=body.name,
         scheme=scheme,
-        multiplicative_depth=body.mult_depth,
+        multiplicative_depth=mult_depth,
         slots=NUM_SLOTS,
         key_id=key_id,
         user_id=user_id,
@@ -319,7 +321,7 @@ def create_fhe_key(body: CreateFheKeyRequest, request: Request):
     return CreateFheKeyResponse(
         key_id=key_id,
         scheme=scheme,
-        multiplicative_depth=body.mult_depth,
+        multiplicative_depth=mult_depth,
         num_slots=NUM_SLOTS,
         slots=NUM_SLOTS,
         ring_base=RING_BASE,
@@ -351,26 +353,46 @@ async def fhe_encrypt(
     fhe_key = resolve_fhe_key(fhe_key_id=fhe_key_id, access_token=access_token)
     model = resolve_model(model_id=model_id, access_token=access_token)
 
+    if model.model_type == "tree":
+        if not model.client_metadata:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Tree model {model_id} has no client_metadata. "
+                    "Publish the model with /fhe-tree-publish first."
+                ),
+            )
+        client_metadata = model.client_metadata
+    else:
+        client_metadata = None
+
     logger.info(
         "fhe-encrypt resolved fhe_key supabase_id=%s storage_path=%s slots=%s key_name=%s "
-        "model_name=%s model_type=%s",
+        "model_name=%s model_type=%s client_metadata=%s",
         fhe_key.id,
         fhe_key.storage_path,
         fhe_key.slots,
         fhe_key.key_name,
         model.name,
         model.model_type,
+        "yes" if client_metadata else "no",
     )
 
     try:
         csv_result = preprocess_csv(file_content)
         logger.info(
-            "fhe-encrypt csv columns=%s removed=%s params_count=%s",
+            "fhe-encrypt csv columns=%s removed=%s params_count=%s model_type=%s",
             csv_result.columns,
             csv_result.removed_columns,
             model.params_count,
+            model.model_type,
         )
-        encrypt_plan = plan_encryption(fhe_key.slots, model.params_count, csv_result)
+        encrypt_plan = plan_encryption(
+            fhe_key.slots,
+            model.params_count,
+            csv_result,
+            client_metadata=client_metadata,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -588,17 +610,34 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
             model_id=str(dataset.model_id),
             access_token=access_token,
         )
-        feature_count = len(model.model_json.get("features", []))
-        logger.info(
-            "[inference] resolved model: id=%s name=%s type=%s params_count=%s "
-            "feature_count=%s intercept=%s",
-            model.id,
-            model.name,
-            model.model_type,
-            model.params_count,
-            feature_count,
-            model.model_json.get("intercept"),
-        )
+        if model.model_type == "tree":
+            if not isinstance(model.model_json.get("fhe_server_bundle"), dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Tree model {dataset.model_id} has no fhe_server_bundle. "
+                        "Publish with /fhe-tree-publish first."
+                    ),
+                )
+            logger.info(
+                "[inference] resolved tree model: id=%s name=%s tree_depth=%s num_paths=%s",
+                model.id,
+                model.name,
+                model.model_json["fhe_server_bundle"].get("tree_depth"),
+                model.model_json["fhe_server_bundle"].get("num_paths"),
+            )
+        else:
+            feature_count = len(model.model_json.get("features", []))
+            logger.info(
+                "[inference] resolved model: id=%s name=%s type=%s params_count=%s "
+                "feature_count=%s intercept=%s",
+                model.id,
+                model.name,
+                model.model_type,
+                model.params_count,
+                feature_count,
+                model.model_json.get("intercept"),
+            )
     except SupabaseNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SupabaseError as exc:
@@ -620,7 +659,7 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
 
     logger.info("[inference] starting homomorphic inference pipeline")
     try:
-        inference_result = run_inference(
+        inference_kwargs = dict(
             dataset_id=dataset.id,
             encrypt_id=dataset.encrypt_id,
             fhe_key_id=dataset.fhe_key_id,
@@ -640,6 +679,10 @@ def fhe_inference(body: FheInferenceRequest, request: Request):
             ciphertext_count=dataset.ciphertext_count,
             model_json=model.model_json,
         )
+        if model.model_type == "tree":
+            inference_result = run_tree_inference(**inference_kwargs)
+        else:
+            inference_result = run_inference(**inference_kwargs)
     except ValueError as exc:
         logger.error(
             "[inference] pipeline failed: encrypted_dataset_id=%s model_id=%s error=%s",

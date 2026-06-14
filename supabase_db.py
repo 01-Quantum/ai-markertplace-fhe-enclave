@@ -108,6 +108,7 @@ class ModelRecord:
     params_count: int
     name: str
     model_type: str
+    client_metadata: Dict[str, Any] | None = None
 
 
 @dataclass
@@ -124,7 +125,7 @@ def resolve_model(*, model_id: str, access_token: str) -> ModelRecord:
         table=SUPABASE_MODELS_TABLE,
         access_token=access_token,
         filters={"id": model_id},
-        select="id,params_count,model_name,model_type",
+        select="id,params_count,model_name,model_type,client_metadata",
         not_found_message=f"Model not found: {model_id}",
     )
     params_count = row.get("params_count")
@@ -133,12 +134,16 @@ def resolve_model(*, model_id: str, access_token: str) -> ModelRecord:
 
     name = row.get("model_name") or ""
     model_type = row.get("model_type") or ""
+    client_metadata = row.get("client_metadata")
+    if client_metadata is not None and not isinstance(client_metadata, dict):
+        client_metadata = None
 
     return ModelRecord(
         id=str(row["id"]),
         params_count=int(params_count),
         name=str(name),
         model_type=str(model_type),
+        client_metadata=client_metadata,
     )
 
 
